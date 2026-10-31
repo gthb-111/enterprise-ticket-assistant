@@ -1,0 +1,14 @@
+[project]
+name = "serviceflow-ai"
+version = "1.0.0"
+description = "Enterprise ticket triage and grounded knowledge-base assistant"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+serviceflow = "serviceflow.cli:main"
+
+[tool.setuptools]
+packages = ["serviceflow"]
+

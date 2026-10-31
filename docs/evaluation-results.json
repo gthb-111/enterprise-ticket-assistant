@@ -1,0 +1,44 @@
+{
+  "cases": 21,
+  "category_accuracy": 1.0,
+  "category_macro_f1": 1.0,
+  "retrieval_hit_at_1": 1.0,
+  "retrieval_hit_at_3": 1.0,
+  "priority_accuracy": 1.0,
+  "priority_under_escalated": 0,
+  "priority_over_escalated": 0,
+  "category_labels": {
+    "billing": "账单与支付",
+    "account": "账号与安全",
+    "logistics": "物流与履约",
+    "refund": "退款与售后",
+    "technical": "产品与技术",
+    "service": "投诉与服务",
+    "general": "其他咨询"
+  },
+  "confusion": {
+    "billing": {
+      "billing": 6
+    },
+    "refund": {
+      "refund": 4
+    },
+    "logistics": {
+      "logistics": 4
+    },
+    "account": {
+      "account": 3
+    },
+    "technical": {
+      "technical": 2
+    },
+    "service": {
+      "service": 1
+    },
+    "general": {
+      "general": 1
+    }
+  },
+  "failures": [],
+  "priority_failures": []
+}

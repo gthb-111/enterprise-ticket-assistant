@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="企业工单智能分流与知识库问答工作台">
+  <title>ServiceFlow AI · 服务运营工作台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#workspace" aria-label="ServiceFlow AI 首页">
+      <span class="brand-mark">
+        <span></span><span></span><span></span>
+      </span>
+      <span class="brand-name">ServiceFlow <b>AI</b></span>
+      <span class="brand-caption">智能服务运营台</span>
+    </a>
+    <nav class="main-nav" aria-label="主导航">
+      <button class="nav-item is-active" data-view="workspace">智能工作台</button>
+      <button class="nav-item" data-view="tickets">工单中心</button>
+      <button class="nav-item" data-view="knowledge">知识库</button>
+    </nav>
+    <div class="system-state">
+      <span class="pulse"></span>
+      <span>本地服务正常</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="view is-active" id="workspace">
+      <div class="page-heading">
+        <div>
+          <p class="eyebrow">SERVICE OPERATIONS / LIVE</p>
+          <h1>让每一个请求，<span>落在对的人手里。</span></h1>
+          <p class="heading-note">意图分流、优先级判断、知识检索与人工升级，在一次提交内完成。</p>
+        </div>
+        <div class="heading-date">
+          <span id="todayLabel"></span>
+          <small>上海时间 · 实时数据</small>
+        </div>
+      </div>
+
+      <div class="metrics" id="metricGrid" aria-label="核心指标">
+        <article class="metric-card">
+          <div class="metric-top"><span>今日处理量</span><i class="metric-icon green">↗</i></div>
+          <strong id="metricTotal">—</strong>
+          <small>累计进入工作流</small>
+        </article>
+        <article class="metric-card">
+          <div class="metric-top"><span>自动解决率</span><i class="metric-icon blue">✓</i></div>
+          <strong id="metricAutoRate">—</strong>
+          <small>知识可靠且无需人工</small>
+        </article>
+        <article class="metric-card">
+          <div class="metric-top"><span>人工升级</span><i class="metric-icon amber">!</i></div>
+          <strong id="metricEscalation">—</strong>
+          <small>低置信或高风险请求</small>
+        </article>
+        <article class="metric-card">
+          <div class="metric-top"><span>答复满意度</span><i class="metric-icon violet">◎</i></div>
+          <strong id="metricHelpful">—</strong>
+          <small id="feedbackHint">等待用户反馈</small>
+        </article>
+      </div>
+
+      <div class="workspace-grid">
+        <section class="panel composer-panel">
+          <div class="panel-heading">
+            <div>
+              <span class="section-index">01</span>
+              <h2>新建服务请求</h2>
+            </div>
+            <span class="privacy-badge">PII 自动脱敏</span>
+          </div>
+          <form id="triageForm">
+            <label class="field">
+              <span>客户问题</span>
+              <textarea id="messageInput" maxlength="4000" rows="6" required
+                placeholder="粘贴客户原话，例如：订单被重复扣款两次，已经两天了还没退回……"></textarea>
+              <span class="char-count"><b id="charCount">0</b> / 4000</span>
+            </label>
+            <div class="sample-row" aria-label="示例问题">
+              <span>快速体验</span>
+              <button type="button" class="sample-chip" data-sample="退款审核通过后多久到账？原路退回到银行卡。">退款到账</button>
+              <button type="button" class="sample-chip" data-sample="包裹显示运输中五天没有更新，物流什么时候能到？">物流延迟</button>
+              <button type="button" class="sample-chip danger" data-sample="怀疑账号被盗，有人用我的账号下单，银行卡也有异常消费。">高风险事件</button>
+            </div>
+            <div class="form-grid">
+              <label class="field compact">
+                <span>客户名称</span>
+                <input id="customerInput" value="陈女士" maxlength="50">
+              </label>
+              <label class="field compact">
+                <span>客户等级</span>
+                <select id="tierInput">
+                  <option value="standard">标准客户</option>
+                  <option value="vip" selected>VIP 客户</option>
+                  <option value="enterprise">企业客户</option>
+                </select>
+              </label>
+              <label class="field compact">
+                <span>关联订单 <em>可选</em></span>
+                <input id="orderInput" placeholder="例如 SF-20261028-3391" maxlength="40">
+              </label>
+            </div>
+            <button class="primary-action" id="submitButton" type="submit">
+              <span>运行智能分流</span>
+              <span class="action-arrow">→</span>
+            </button>
+          </form>
+        </section>
+
+        <aside class="right-rail">
+          <section class="panel health-panel">
+            <div class="panel-heading slim">
+              <div>
+                <span class="section-index">02</span>
+                <h2>当前分流概览</h2>
+              </div>
+              <button class="text-button" id="refreshButton" type="button">刷新</button>
+            </div>
+            <div class="priority-stack" id="priorityStack"></div>
+            <div class="queue-note">
+              <span class="queue-dot"></span>
+              <p>高风险事件会立即提升为 P0，并同步至客户成功组。</p>
+            </div>
+          </section>
+          <section class="panel recent-panel">
+            <div class="panel-heading slim">
+              <div>
+                <span class="section-index">03</span>
+                <h2>最近工单</h2>
+              </div>
+              <button class="text-button" data-jump="tickets" type="button">查看全部</button>
+            </div>
+            <div class="recent-list" id="recentList">
+              <div class="empty-state mini">暂无工单数据</div>
+            </div>
+          </section>
+        </aside>
+      </div>
+
+      <section class="result-panel panel is-hidden" id="resultPanel" aria-live="polite">
+        <div class="result-top">
+          <div>
+            <span class="section-index">DECISION</span>
+            <h2>AI 处理建议</h2>
+          </div>
+          <div class="result-status" id="resultStatus"></div>
+        </div>
+        <div class="decision-grid">
+          <div class="decision-main">
+            <div class="decision-meta">
+              <div><span>业务意图</span><strong id="resultCategory">—</strong></div>
+              <div><span>优先级</span><strong id="resultPriority">—</strong></div>
+              <div><span>负责团队</span><strong id="resultTeam">—</strong></div>
+              <div><span>工单编号</span><strong class="mono" id="resultTicketId">—</strong></div>
+            </div>
+            <div class="answer-block">
+              <div class="answer-label"><span>建议答复</span><span id="generationMode"></span></div>
+              <div class="answer-copy" id="resultAnswer"></div>
+            </div>
+            <div class="confidence-row">
+              <div class="confidence-copy"><span>意图置信度</span><b id="resultConfidence">—</b></div>
+              <div class="confidence-track"><i id="confidenceBar"></i></div>
+              <div class="confidence-copy"><span>知识相关性</span><b id="resultRelevance">—</b></div>
+              <div class="confidence-track"><i id="relevanceBar"></i></div>
+            </div>
+          </div>
+          <div class="decision-side">
+            <h3>判断依据</h3>
+            <ul class="reason-list" id="reasonList"></ul>
+            <div class="citation-heading">
+              <h3>知识来源</h3>
+              <span id="citationCount">0 条</span>
+            </div>
+            <div id="citationList"></div>
+            <div class="feedback-actions">
+              <span>这次建议有帮助吗？</span>
+              <button type="button" data-rating="helpful">有帮助</button>
+              <button type="button" data-rating="unhelpful">需优化</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <section class="view" id="tickets">
+      <div class="subpage-heading">
+        <div>
+          <p class="eyebrow">TICKET OPERATIONS</p>
+          <h1>工单中心</h1>
+          <p>按照业务意图与处理状态追踪服务请求。</p>
+        </div>
+        <div class="filter-group">
+          <select id="ticketStatusFilter" aria-label="按状态筛选">
+            <option value="">全部状态</option>
+            <option value="auto_resolved">自动解决</option>
+            <option value="pending_agent">待人工复核</option>
+            <option value="escalated">已升级</option>
+            <option value="resolved">人工已解决</option>
+          </select>
+        </div>
+      </div>
+      <section class="panel table-panel">
+        <div class="table-head">
+          <span>工单 / 客户</span><span>业务意图</span><span>优先级</span>
+          <span>状态</span><span>负责团队</span><span>创建时间</span>
+        </div>
+        <div id="ticketTable" class="ticket-table"></div>
+      </section>
+    </section>
+
+    <section class="view" id="knowledge">
+      <div class="subpage-heading">
+        <div>
+          <p class="eyebrow">GROUNDED KNOWLEDGE</p>
+          <h1>知识库</h1>
+          <p>每一条答复都带可追溯依据，知识更新后可即时重载索引。</p>
+        </div>
+        <button class="secondary-action" id="reloadKnowledge" type="button">重新载入知识</button>
+      </div>
+      <div class="knowledge-grid" id="knowledgeGrid"></div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status"></div>
+  <div class="loading-mask is-hidden" id="loadingMask">
+    <div class="loading-card">
+      <div class="scanner"><span></span></div>
+      <strong>正在分析服务请求</strong>
+      <small>意图识别 · 风险评估 · 知识召回 · 策略决策</small>
+    </div>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
+

@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.env
+.data/
+docs/简历与面试素材.md
+dist/
+.DS_Store
+

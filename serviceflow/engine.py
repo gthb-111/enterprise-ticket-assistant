@@ -4,15 +4,17 @@ from dataclasses import dataclass
 from collections.abc import Iterator
 from typing import Any, TypedDict
 
+from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
 from .classifier import TEAM_BY_CATEGORY, Classification, classify
 from .config import Settings
 from .knowledge import KnowledgeBase, RetrievedChunk, best_sentences
-from .llm import polish_answer
+from .llm import GroundedModel, ModelCallError
 from .pii import mask_pii
-from .retrieval import build_contextual_query, heuristic_rerank, rewrite_query
+from .retrieval import build_contextual_query, rewrite_query
 from .storage import TicketStore
+from .tools import AgentToolbox, ToolCallRecord
 
 
 @dataclass
@@ -46,6 +48,9 @@ class AgentState(TypedDict, total=False):
     ticket: dict[str, Any]
     result: AssistResult
     trace: list[dict[str, Any]]
+    tool_calls: list[ToolCallRecord]
+    model_metadata: dict[str, Any]
+    stream_answer: bool
 
 
 class TriageEngine:
@@ -53,6 +58,8 @@ class TriageEngine:
         self.kb = kb
         self.store = store
         self.settings = settings
+        self.tools = AgentToolbox(kb, store)
+        self.model = GroundedModel(settings)
         self.workflow_nodes = (
             "prepare",
             "knowledge_search",
@@ -61,6 +68,10 @@ class TriageEngine:
             "human_handoff",
         )
         self.graph = self._build_graph()
+
+    def set_knowledge(self, kb: KnowledgeBase) -> None:
+        self.kb = kb
+        self.tools.kb = kb
 
     def assist(
         self,
@@ -77,6 +88,7 @@ class TriageEngine:
                 customer_tier,
                 order_id,
                 history,
+                stream_answer=False,
             )
         )
         return final_state["result"]
@@ -90,6 +102,7 @@ class TriageEngine:
         history: list[dict[str, Any]] | None = None,
     ) -> Iterator[dict[str, Any]]:
         final_result: AssistResult | None = None
+        answer_delta_seen = False
         for update in self.graph.stream(
             self._initial_state(
                 message,
@@ -97,9 +110,20 @@ class TriageEngine:
                 customer_tier,
                 order_id,
                 history,
+                stream_answer=True,
             ),
-            stream_mode="updates",
+            stream_mode=["updates", "custom"],
         ):
+            mode, payload = update
+            if mode == "custom":
+                if payload.get("type") == "answer_delta":
+                    answer_delta_seen = True
+                    yield {
+                        "event": "answer_delta",
+                        "data": {"delta": payload.get("delta", "")},
+                    }
+                continue
+            update = payload
             for node, node_update in update.items():
                 if not isinstance(node_update, dict):
                     continue
@@ -114,11 +138,12 @@ class TriageEngine:
         if final_result is None:
             raise RuntimeError("Agent workflow did not produce a result")
         answer = final_result.ticket["answer"]
-        for start in range(0, len(answer), 28):
-            yield {
-                "event": "answer_delta",
-                "data": {"delta": answer[start : start + 28]},
-            }
+        if not answer_delta_seen:
+            for start in range(0, len(answer), 28):
+                yield {
+                    "event": "answer_delta",
+                    "data": {"delta": answer[start : start + 28]},
+                }
         yield {
             "event": "final",
             "data": {
@@ -136,6 +161,7 @@ class TriageEngine:
         customer_tier: str,
         order_id: str,
         history: list[dict[str, Any]] | None,
+        stream_answer: bool,
     ) -> AgentState:
         return {
             "message": message,
@@ -144,6 +170,8 @@ class TriageEngine:
             "order_id": order_id,
             "history": history or [],
             "trace": [],
+            "tool_calls": [],
+            "stream_answer": stream_answer,
         }
 
     def _build_graph(self):
@@ -200,15 +228,16 @@ class TriageEngine:
             state.get("history", []),
         )
         rewritten = rewrite_query(contextual_query)
+        matches, tool_call = self.tools.search_knowledge(
+            rewritten.rewritten_query,
+            classification.category,
+            candidate_k=12,
+            limit=4,
+        )
         candidates = self.kb.search(
             rewritten.rewritten_query,
             classification.category,
             top_k=12,
-        )
-        matches = heuristic_rerank(
-            rewritten.rewritten_query,
-            candidates,
-            limit=4,
         )
         return {
             "rewritten": rewritten,
@@ -216,6 +245,7 @@ class TriageEngine:
             "memory_used": memory_used,
             "candidates": candidates,
             "matches": matches,
+            "tool_calls": [*state.get("tool_calls", []), tool_call],
             "trace": self._append_trace(
                 state,
                 "knowledge_search",
@@ -236,8 +266,23 @@ class TriageEngine:
             if match.relevance >= self.settings.min_relevance_threshold
         ][:3]
         citations = self._citations(relevant)
-        answer, generation_mode = self._answer(
-            masked_text, relevant, classification, top_relevance
+        on_delta = None
+        if state.get("stream_answer"):
+            try:
+                writer = get_stream_writer()
+            except RuntimeError:
+                writer = None
+            if writer is not None:
+                def emit_delta(delta: str) -> None:
+                    writer({"type": "answer_delta", "delta": delta})
+
+                on_delta = emit_delta
+        answer, generation_mode, model_metadata = self._answer(
+            masked_text,
+            relevant,
+            classification,
+            top_relevance,
+            on_delta=on_delta,
         )
         decision = self._decision(
             classification, top_relevance, bool(relevant), answer
@@ -253,6 +298,7 @@ class TriageEngine:
             "generation_mode": generation_mode,
             "decision": decision,
             "explanation": explanation,
+            "model_metadata": model_metadata,
             "trace": self._append_trace(
                 state,
                 "compose",
@@ -289,26 +335,28 @@ class TriageEngine:
         }[decision]
         customer_name = state.get("customer_name", "匿名客户")
         order_id = state.get("order_id", "")
-        ticket = self.store.create_ticket(
-            {
-                "message_original": message,
-                "message_masked": masked_text,
-                "customer_name": customer_name.strip()[:50] or "匿名客户",
-                "customer_tier": state.get("customer_tier", "standard"),
-                "order_id": order_id.strip()[:40],
-                "category": classification.category,
-                "category_label": classification.category_label,
-                "priority": classification.priority,
-                "confidence": classification.confidence,
-                "relevance": top_relevance,
-                "status": status,
-                "assigned_team": TEAM_BY_CATEGORY[classification.category],
-                "answer": answer,
-                "citations": state["citations"],
-                "reasons": classification.reasons,
-                "generation_mode": state["generation_mode"],
-                "resolution_minutes": 0 if decision == "auto_reply" else None,
-            }
+        ticket_payload = {
+            "message_original": message,
+            "message_masked": masked_text,
+            "customer_name": customer_name.strip()[:50] or "匿名客户",
+            "customer_tier": state.get("customer_tier", "standard"),
+            "order_id": order_id.strip()[:40],
+            "category": classification.category,
+            "category_label": classification.category_label,
+            "priority": classification.priority,
+            "confidence": classification.confidence,
+            "relevance": top_relevance,
+            "status": status,
+            "assigned_team": TEAM_BY_CATEGORY[classification.category],
+            "answer": answer,
+            "citations": state["citations"],
+            "reasons": classification.reasons,
+            "generation_mode": state["generation_mode"],
+            "resolution_minutes": 0 if decision == "auto_reply" else None,
+        }
+        ticket, tool_call = self.tools.create_ticket(
+            ticket_payload,
+            handoff=decision != "auto_reply",
         )
         trace = self._append_trace(
             state,
@@ -338,7 +386,12 @@ class TriageEngine:
                 "framework": "langgraph",
                 "workflow_nodes": list(self.workflow_nodes),
                 "trace": trace,
+                "tool_calls": [
+                    item.as_dict()
+                    for item in [*state.get("tool_calls", []), tool_call]
+                ],
             },
+            "model": state.get("model_metadata", {}),
         }
         result = AssistResult(
             ticket=ticket,
@@ -369,13 +422,18 @@ class TriageEngine:
         matches: list[RetrievedChunk],
         classification: Classification,
         relevance: float,
-    ) -> tuple[str, str]:
+        on_delta: Any = None,
+    ) -> tuple[str, str, dict[str, Any]]:
         if not matches or relevance < self.settings.min_relevance_threshold:
             return (
                 "当前知识库没有找到足够可靠的处理依据。已为你创建工单，"
                 f"将转交{TEAM_BY_CATEGORY[classification.category]}进一步核实，"
                 "请勿重复提交，以免影响处理进度。",
                 "safe_fallback",
+                {
+                    "status": "offline",
+                    "reason": "insufficient_evidence",
+                },
             )
         evidence = [
             {
@@ -385,9 +443,39 @@ class TriageEngine:
             }
             for item in matches
         ]
-        llm_result = polish_answer(query, evidence, self.settings)
-        if llm_result:
-            return llm_result.text, llm_result.mode
+        model_error = ""
+        if self.model.configured:
+            try:
+                generated = self.model.generate_grounded(
+                    query,
+                    evidence,
+                    on_delta=on_delta,
+                )
+                source_footer = "参考来源：" + " ".join(
+                    f"[{item.chunk.chunk_id}]" for item in matches[:3]
+                )
+                text = generated.text
+                if "#c" not in text:
+                    footer = f"\n\n{source_footer}"
+                    text = f"{text}{footer}"
+                    if on_delta is not None:
+                        on_delta(footer)
+                return (
+                    text,
+                    "llm_grounded",
+                    {
+                        "status": "ok",
+                        "model": generated.model,
+                        "attempts": generated.attempts,
+                        "latency_ms": generated.latency_ms,
+                        "usage": generated.usage,
+                        "streamed": on_delta is not None,
+                    },
+                )
+            except ModelCallError as exc:
+                if on_delta is not None:
+                    raise
+                model_error = str(exc)
         sentences = best_sentences(matches, query, limit=3)
         citation_ids = " ".join(
             f"[{item.chunk.chunk_id}]" for item in matches[:2]
@@ -397,7 +485,17 @@ class TriageEngine:
         )
         if matches[0].chunk.category == classification.category:
             answer += f"\n\n依据：{citation_ids}"
-        return answer, "extractive_grounded"
+        metadata: dict[str, Any] = {
+            "status": "offline" if not self.model.configured else "fallback",
+            "reason": (
+                "model_not_configured"
+                if not self.model.configured
+                else "model_call_failed"
+            ),
+        }
+        if model_error:
+            metadata["error"] = model_error
+        return answer, "extractive_grounded", metadata
 
     def _decision(
         self,

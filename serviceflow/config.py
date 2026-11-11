@@ -4,8 +4,11 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env", override=False)
 
 
 @dataclass(frozen=True)
@@ -23,6 +26,10 @@ class Settings:
     openai_model: str
     vector_weight: float
     vector_dimensions: int
+    llm_timeout_seconds: float
+    llm_max_retries: int
+    llm_max_concurrency: int
+    llm_max_tokens: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -48,5 +55,13 @@ class Settings:
             openai_model=os.getenv("SERVICEFLOW_MODEL", "gpt-4.1-mini"),
             vector_weight=float(os.getenv("SERVICEFLOW_VECTOR_WEIGHT", "0.35")),
             vector_dimensions=int(os.getenv("SERVICEFLOW_VECTOR_DIMENSIONS", "512")),
+            llm_timeout_seconds=float(
+                os.getenv("SERVICEFLOW_LLM_TIMEOUT_SECONDS", "30")
+            ),
+            llm_max_retries=int(os.getenv("SERVICEFLOW_LLM_MAX_RETRIES", "2")),
+            llm_max_concurrency=int(
+                os.getenv("SERVICEFLOW_LLM_MAX_CONCURRENCY", "2")
+            ),
+            llm_max_tokens=int(os.getenv("SERVICEFLOW_LLM_MAX_TOKENS", "900")),
         )
 

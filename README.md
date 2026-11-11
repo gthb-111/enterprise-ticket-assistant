@@ -2,7 +2,8 @@
 
 一个可直接运行的服务运营项目：接收客户问题后，通过 LangGraph 编排敏感信息脱敏、业务意图识别、风险与紧急度评估、知识库检索、带来源答复、人工升级和工单沉淀。
 
-项目使用 FastAPI 提供服务，默认不需要联网或 API Key；配置 OpenAI 兼容模型后，可在原有证据约束流程上启用生成式润色。
+项目使用 FastAPI 提供服务，默认不需要联网或 API Key；在 `.env`
+配置 OpenAI 兼容模型后，可在原有证据约束流程上启用生成式回答。
 
 ![ServiceFlow AI 工作台](docs/workspace-screenshot.png)
 
@@ -30,20 +31,19 @@ ServiceFlow AI 将这些决策放在同一条可审计的流水线里。
 - **运营闭环**：工单状态、负责团队、SLA、用户反馈、自动解决率与升级率。
 - **Agent 编排**：LangGraph 条件分支、自动工单节点、人工交接节点和逐步执行轨迹。
 - **会话与流式输出**：持久化多轮会话，追问可携带上下文，SSE 返回节点进度和答案增量。
+- **可审计工具层**：知识检索、查询工单、创建工单和人工交接均返回结构化调用记录。
 - **响应式工作台**：智能分流、工单中心、知识库三个视图，适配桌面和移动端。
 
 ## 快速运行
 
-需要 Python 3.10 或更高版本。首次运行先安装项目依赖：
-
-```powershell
-python -m pip install -e .
-```
+需要 Python 3.10 或更高版本。首次运行先创建独立虚拟环境并安装依赖：
 
 ```powershell
 cd enterprise-ticket-assistant
-python run.py seed-demo
-python run.py serve
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe run.py seed-demo
+.\.venv\Scripts\python.exe run.py serve
 ```
 
 浏览器打开 <http://127.0.0.1:8877>。首次启动会自动创建 `.data/serviceflow.db`，演示工单不会被提交进 Git。如果端口被占用，可使用 `python run.py serve --port 9000`。
@@ -51,27 +51,31 @@ python run.py serve
 只启动服务、不写入演示数据：
 
 ```powershell
-python run.py serve
+.\.venv\Scripts\python.exe run.py serve
 ```
 
 命令行验证一次分流：
 
 ```powershell
-python run.py assist --message "退款审核通过后多久到账？" --tier vip
+.\.venv\Scripts\python.exe run.py assist --message "退款审核通过后多久到账？" --tier vip
 ```
 
 ## 可选模型配置
 
 项目默认关闭大模型，此时答案为“本地抽取 + 引用”，可完全离线演示。
 
-```powershell
-$env:SERVICEFLOW_LLM_ENABLED="1"
-$env:OPENAI_API_KEY="your-key"
-$env:SERVICEFLOW_MODEL="gpt-4.1-mini"
-python run.py serve
+复制 `.env.example` 为 `.env`，填写自己的 API Key、服务地址和模型名称。
+DeepSeek 示例：
+
+```dotenv
+SERVICEFLOW_LLM_ENABLED=1
+OPENAI_API_KEY=your-private-key
+OPENAI_BASE_URL=https://api.deepseek.com
+SERVICEFLOW_MODEL=deepseek-chat
 ```
 
-如果使用其他 OpenAI 兼容服务，可设置 `OPENAI_BASE_URL`。模型调用失败时会自动回退，不阻塞工单创建。
+密钥只从环境变量或被 Git 忽略的 `.env` 读取。模型调用包含超时、有限重试、
+并发限制和 Token 用量记录；失败时会自动回退到本地抽取式答案。
 
 ## 核心流程
 
@@ -97,6 +101,8 @@ python run.py serve
 | --- | --- | --- |
 | `GET` | `/api/health` | 服务与知识库状态 |
 | `GET` | `/api/agent/info` | Agent 框架、节点和路由信息 |
+| `GET` | `/api/model/info` | 模型配置状态、超时和并发参数 |
+| `POST` | `/api/model/test` | 发起一次最小模型连通性测试 |
 | `POST` | `/api/assist` | 分流、检索、答复并创建工单 |
 | `GET` | `/api/tickets` | 工单列表，支持状态与数量筛选 |
 | `POST` | `/api/tickets/{id}/status` | 更新人工处理状态 |
@@ -112,6 +118,9 @@ python run.py serve
 | `GET` | `/api/sessions/{id}` | 查看会话和历史消息 |
 | `POST` | `/api/chat` | 在会话中运行 Agent 并返回完整结果 |
 | `POST` | `/api/chat/stream` | 以 SSE 流式返回 Agent 节点和答案 |
+| `GET` | `/api/tools` | 查看 Agent 可用工具及输入结构 |
+| `POST` | `/api/tools/knowledge_search` | 单独调用知识检索工具 |
+| `POST` | `/api/tools/get_ticket` | 单独调用工单查询工具 |
 
 示例：
 

@@ -16,6 +16,8 @@ class EngineTests(unittest.TestCase):
             **{
                 **settings.__dict__,
                 "db_path": Path(self.tempdir.name) / "test.db",
+                "llm_enabled": False,
+                "openai_api_key": "",
             }
         )
         self.store = TicketStore(self.settings.db_path)

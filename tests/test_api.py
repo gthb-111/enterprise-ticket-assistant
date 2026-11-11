@@ -18,6 +18,8 @@ class ApiTests(unittest.TestCase):
             **{
                 **base.__dict__,
                 "db_path": Path(self.tempdir.name) / "api-test.db",
+                "llm_enabled": False,
+                "openai_api_key": "",
             }
         )
         self.client = TestClient(create_app(self.settings))
@@ -31,10 +33,19 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
         self.assertEqual(response.json()["agent_framework"], "langgraph")
+        self.assertEqual(response.json()["model_mode"], "offline_fallback")
 
         schema = self.client.get("/openapi.json")
         self.assertEqual(schema.status_code, 200)
         self.assertIn("/api/assist", schema.json()["paths"])
+
+    def test_model_info_is_safe_without_configuration(self):
+        response = self.client.get("/api/model/info")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["configured"])
+        self.assertEqual(payload["mode"], "offline_fallback")
+        self.assertNotIn("api_key", payload)
 
     def test_assist_creates_ticket_and_metrics(self):
         response = self.client.post(
@@ -59,6 +70,11 @@ class ApiTests(unittest.TestCase):
                 "persist_ticket",
             ],
         )
+        tool_names = [
+            item["name"]
+            for item in payload["retrieval"]["agent"]["tool_calls"]
+        ]
+        self.assertEqual(tool_names, ["knowledge_search", "create_ticket"])
 
         metrics = self.client.get("/api/metrics")
         self.assertEqual(metrics.status_code, 200)
@@ -163,6 +179,41 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(payload["decision"], "escalate")
         trace = payload["retrieval"]["agent"]["trace"]
         self.assertEqual(trace[-1]["node"], "human_handoff")
+        tool_names = [
+            item["name"]
+            for item in payload["retrieval"]["agent"]["tool_calls"]
+        ]
+        self.assertEqual(tool_names, ["knowledge_search", "handoff_ticket"])
+
+    def test_tool_manifests_and_knowledge_search(self):
+        manifests = self.client.get("/api/tools")
+        self.assertEqual(manifests.status_code, 200)
+        names = [item["name"] for item in manifests.json()["items"]]
+        self.assertEqual(
+            names,
+            [
+                "knowledge_search",
+                "get_ticket",
+                "create_ticket",
+                "handoff_ticket",
+            ],
+        )
+        search = self.client.post(
+            "/api/tools/knowledge_search",
+            json={
+                "query": "退款多久到账",
+                "category": "refund",
+                "candidate_k": 8,
+                "limit": 3,
+            },
+        )
+        self.assertEqual(search.status_code, 200)
+        self.assertEqual(
+            search.json()["tool_call"]["name"],
+            "knowledge_search",
+        )
+        self.assertEqual(search.json()["tool_call"]["status"], "ok")
+        self.assertTrue(search.json()["items"])
 
     def test_chat_session_keeps_follow_up_context(self):
         self.client.post(

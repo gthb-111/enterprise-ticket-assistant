@@ -21,6 +21,7 @@ from .config import Settings
 from .documents import MAX_DOCUMENT_BYTES, DocumentStore, parse_document
 from .engine import TriageEngine
 from .knowledge import KnowledgeBase
+from .llm import ModelCallError
 from .retrieval import heuristic_rerank, rewrite_query
 from .sessions import SessionStore
 from .storage import TicketStore
@@ -55,6 +56,17 @@ class ChatRequest(BaseModel):
     order_id: str = Field(default="", max_length=40)
 
 
+class ToolSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=4000)
+    category: str | None = None
+    candidate_k: int = Field(default=12, ge=1, le=30)
+    limit: int = Field(default=4, ge=1, le=20)
+
+
+class ToolTicketRequest(BaseModel):
+    ticket_id: str = Field(min_length=1, max_length=40)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     store = TicketStore(settings.db_path)
@@ -78,7 +90,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def refresh_knowledge() -> KnowledgeBase:
         refreshed = _load_knowledge(settings, document_store)
         app.state.knowledge = refreshed
-        engine.kb = refreshed
+        engine.set_knowledge(refreshed)
         return refreshed
 
     def ensure_session(session_id: str | None, first_message: str = "") -> str:
@@ -172,6 +184,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "knowledge_chunks": len(app.state.knowledge.chunks),
             "llm_enabled": settings.llm_enabled,
             "agent_framework": "langgraph",
+            "tool_count": len(engine.tools.manifests()),
+            "model_mode": engine.model.info()["mode"],
+            "model_configured": engine.model.configured,
+        }
+
+    @app.get("/api/model/info")
+    def model_info() -> dict[str, Any]:
+        return engine.model.info()
+
+    @app.post("/api/model/test")
+    def model_test() -> dict[str, Any]:
+        try:
+            result = engine.model.ping()
+        except ModelCallError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "text": result.text,
+            "model": result.model,
+            "attempts": result.attempts,
+            "latency_ms": result.latency_ms,
+            "usage": result.usage,
         }
 
     @app.get("/api/agent/info")
@@ -185,7 +219,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "escalate": "human_handoff",
             },
             "trace_returned_in": "/api/assist -> retrieval.agent.trace",
+            "tools_returned_in": "/api/assist -> retrieval.agent.tool_calls",
         }
+
+    @app.get("/api/tools")
+    def list_tools() -> dict[str, Any]:
+        return {"items": engine.tools.manifests()}
+
+    @app.post("/api/tools/knowledge_search")
+    def invoke_knowledge_search(payload: ToolSearchRequest) -> dict[str, Any]:
+        rewritten = rewrite_query(payload.query)
+        matches, record = engine.tools.search_knowledge(
+            rewritten.rewritten_query,
+            payload.category,
+            candidate_k=payload.candidate_k,
+            limit=payload.limit,
+        )
+        return {
+            "tool_call": record.as_dict(),
+            "query": rewritten.original_query,
+            "rewritten_query": rewritten.rewritten_query,
+            "items": [
+                {
+                    "chunk_id": item.chunk.chunk_id,
+                    "title": item.chunk.title,
+                    "source": item.chunk.source,
+                    "text": item.chunk.text,
+                    "relevance": item.relevance,
+                }
+                for item in matches
+            ],
+        }
+
+    @app.post("/api/tools/get_ticket")
+    def invoke_get_ticket(payload: ToolTicketRequest) -> dict[str, Any]:
+        ticket, record = engine.tools.get_ticket(payload.ticket_id)
+        if ticket is None:
+            raise HTTPException(status_code=404, detail="工单不存在")
+        return {"tool_call": record.as_dict(), "ticket": ticket}
 
     @app.post("/api/assist", status_code=status.HTTP_201_CREATED)
     def assist(payload: AssistRequest) -> dict[str, Any]:

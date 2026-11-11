@@ -1,32 +1,22 @@
 const state = {
-  currentTicketId: "",
-  feedbackSent: false,
+  sessionId: null,
+  busy: false,
+  sourceCards: [],
+  trace: [],
+  toolCalls: [],
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
-const decisionLabels = {
-  auto_reply: "自动答复 · 无需人工",
-  human_review: "转人工复核",
-  escalate: "升级处理",
-};
-
-const statusLabels = {
-  auto_resolved: "自动解决",
-  pending_agent: "待人工",
-  escalated: "已升级",
-  resolved: "已解决",
-};
-
-const categoryColors = {
-  billing: "账单",
-  account: "账号",
-  logistics: "物流",
-  refund: "退款",
-  technical: "技术",
-  service: "投诉",
-  general: "通用",
+const categoryLabels = {
+  billing: "账单与支付",
+  account: "账号与安全",
+  logistics: "物流与履约",
+  refund: "退款与售后",
+  technical: "产品与技术",
+  service: "投诉与服务",
+  general: "通用咨询",
 };
 
 function escapeHTML(value = "") {
@@ -38,14 +28,24 @@ function escapeHTML(value = "") {
     .replaceAll("'", "&#039;");
 }
 
+function answerMarkup(value = "") {
+  return escapeHTML(value).replace(
+    /\[([a-zA-Z0-9_-]+#c\d+)\]/g,
+    '<span class="citation-token">$1</span>',
+  );
+}
+
 async function api(path, options = {}) {
+  const isForm = options.body instanceof FormData;
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
+    headers: isForm
+      ? options.headers || {}
+      : { "Content-Type": "application/json", ...(options.headers || {}) },
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(payload.error || `请求失败 (${response.status})`);
+    throw new Error(payload.error || payload.detail || `请求失败 (${response.status})`);
   }
   return payload;
 }
@@ -55,20 +55,13 @@ function toast(message) {
   node.textContent = message;
   node.classList.add("is-visible");
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => node.classList.remove("is-visible"), 2400);
+  toast.timer = setTimeout(() => node.classList.remove("is-visible"), 2800);
 }
 
-function setView(name) {
-  $$(".view").forEach((view) => view.classList.toggle("is-active", view.id === name));
-  $$(".nav-item").forEach((item) => item.classList.toggle("is-active", item.dataset.view === name));
-  window.scrollTo({ top: 0, behavior: "smooth" });
-  if (name === "tickets") loadTickets();
-  if (name === "knowledge") loadKnowledge();
-}
-
-function formatTime(value) {
-  if (!value) return "—";
+function formatDate(value) {
+  if (!value) return "";
   const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
   return new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit",
     day: "2-digit",
@@ -78,254 +71,500 @@ function formatTime(value) {
   }).format(date);
 }
 
-async function loadMetrics() {
-  try {
-    const metrics = await api("/api/metrics");
-    $("#metricTotal").textContent = metrics.total;
-    $("#metricAutoRate").textContent = `${Math.round(metrics.auto_resolve_rate * 100)}%`;
-    $("#metricEscalation").textContent = metrics.escalated;
-    $("#metricHelpful").textContent = metrics.helpful_rate == null
-      ? "—"
-      : `${Math.round(metrics.helpful_rate * 100)}%`;
-    $("#feedbackHint").textContent = metrics.feedback_count
-      ? `${metrics.feedback_count} 份用户反馈`
-      : "等待用户反馈";
-
-    const priorities = ["P0", "P1", "P2", "P3"];
-    const max = Math.max(1, ...priorities.map((p) => metrics.by_priority[p] || 0));
-    $("#priorityStack").innerHTML = priorities.map((priority) => {
-      const count = metrics.by_priority[priority] || 0;
-      return `
-        <div class="priority-line">
-          <span class="priority-label">${priority}</span>
-          <div class="priority-track"><i style="width:${Math.max(5, count / max * 100)}%"></i></div>
-          <strong>${count}</strong>
-        </div>`;
-    }).join("");
-  } catch (error) {
-    toast(error.message);
-  }
+function scrollToBottom() {
+  requestAnimationFrame(() => {
+    const scroller = $("#conversationScroll");
+    scroller.scrollTop = scroller.scrollHeight;
+  });
 }
 
-async function loadRecent() {
+function setEmptyVisible(visible) {
+  $("#emptyState").classList.toggle("is-hidden", !visible);
+}
+
+function resetInspector() {
+  state.sourceCards = [];
+  state.trace = [];
+  state.toolCalls = [];
+  $("#statModel").textContent = "—";
+  $("#statLatency").textContent = "—";
+  $("#statTokens").textContent = "—";
+  $("#panel-trace").innerHTML = `
+    <div class="panel-empty">
+      <span class="panel-empty-mark">↳</span>
+      <p>提出问题后，这里会显示 LangGraph 的节点与工具调用。</p>
+    </div>`;
+  $("#panel-sources").innerHTML = `
+    <div class="panel-empty">
+      <span class="panel-empty-mark">⌕</span>
+      <p>检索完成后，这里会显示答案引用的原文段落。</p>
+    </div>`;
+}
+
+function startNewChat() {
+  if (state.busy) return;
+  state.sessionId = null;
+  $("#messageList").innerHTML = "";
+  setEmptyVisible(true);
+  resetInspector();
+  setPanel("trace");
+  $("#messageInput").value = "";
+  autoResizeInput();
+  $$(".session-item").forEach((item) => item.classList.remove("is-active"));
+  $("#messageInput").focus();
+}
+
+function appendMessage(role, content = "", loading = false) {
+  setEmptyVisible(false);
+  const article = document.createElement("article");
+  article.className = `message ${role}${loading ? " is-loading" : ""}`;
+  article.innerHTML = `
+    <div class="message-avatar">${role === "assistant" ? "SF" : "你"}</div>
+    <div>
+      <p class="message-meta">${role === "assistant" ? "ServiceFlow Agent" : "你"}</p>
+      <div class="message-bubble"></div>
+    </div>`;
+  const bubble = $(".message-bubble", article);
+  if (loading) {
+    bubble.innerHTML = '<span class="typing-dots"><i></i><i></i><i></i></span>';
+  } else {
+    bubble.textContent = content;
+  }
+  $("#messageList").append(article);
+  scrollToBottom();
+  return { article, bubble };
+}
+
+function renderSession(session) {
+  $("#messageList").innerHTML = "";
+  if (!session.messages?.length) {
+    setEmptyVisible(true);
+    return;
+  }
+  setEmptyVisible(false);
+  session.messages.forEach((message) => {
+    const role = message.role === "assistant" ? "assistant" : "user";
+    const { article, bubble } = appendMessage(role, message.content);
+    article.classList.add("is-complete");
+    if (role === "assistant") bubble.innerHTML = answerMarkup(message.content);
+    if (role === "assistant" && message.metadata?.sources?.length) {
+      state.sourceCards = message.metadata.sources.map((source) => ({
+        title: source.split(/[\\/]/).pop(),
+        source,
+        snippet: "会话历史来源记录",
+        relevance: null,
+      }));
+      renderSources();
+    }
+  });
+  scrollToBottom();
+}
+
+async function loadSessions() {
   try {
-    const data = await api("/api/tickets?limit=5");
+    const data = await api("/api/sessions");
     const items = data.items || [];
     if (!items.length) {
-      $("#recentList").innerHTML = '<div class="empty-state mini">暂无工单数据，提交一条请求开始体验。</div>';
+      $("#sessionList").innerHTML = '<p class="session-empty">还没有对话记录</p>';
       return;
     }
-    $("#recentList").innerHTML = items.map((ticket) => `
-      <button class="recent-item row-action" data-ticket="${escapeHTML(ticket.id)}" type="button">
-        <strong>${escapeHTML(ticket.category_label)} · ${escapeHTML(ticket.customer_name)}</strong>
-        <p>${escapeHTML(ticket.message_masked)}</p>
-        <span class="priority-pill ${escapeHTML(ticket.priority)}">${escapeHTML(ticket.priority)}</span>
+    $("#sessionList").innerHTML = items.map((item) => `
+      <button class="session-item${item.id === state.sessionId ? " is-active" : ""}"
+        data-session="${escapeHTML(item.id)}" type="button">
+        <strong>${escapeHTML(item.title || "未命名会话")}</strong>
+        <small>${formatDate(item.updated_at)} · ${item.message_count || 0} 条消息</small>
       </button>`).join("");
+    $$("[data-session]").forEach((button) => {
+      button.addEventListener("click", () => openSession(button.dataset.session));
+    });
+  } catch (error) {
+    $("#sessionList").innerHTML = '<p class="session-empty">会话读取失败</p>';
+  }
+}
+
+async function openSession(sessionId) {
+  if (state.busy) return;
+  try {
+    const session = await api(`/api/sessions/${encodeURIComponent(sessionId)}`);
+    state.sessionId = sessionId;
+    resetInspector();
+    renderSession(session);
+    $$(".session-item").forEach((item) => {
+      item.classList.toggle("is-active", item.dataset.session === sessionId);
+    });
+    if (window.innerWidth <= 850) $("#inspector").classList.remove("is-open");
   } catch (error) {
     toast(error.message);
   }
 }
 
-function renderResult(payload) {
-  const { ticket, decision, explanation } = payload;
-  state.currentTicketId = ticket.id;
-  state.feedbackSent = false;
-  $("#resultPanel").classList.remove("is-hidden");
-  $("#resultStatus").className = `result-status ${decision}`;
-  $("#resultStatus").textContent = decisionLabels[decision] || decision;
-  $("#resultCategory").textContent = ticket.category_label;
-  $("#resultPriority").textContent = ticket.priority;
-  $("#resultTeam").textContent = ticket.assigned_team;
-  $("#resultTicketId").textContent = ticket.id;
-  $("#resultAnswer").textContent = ticket.answer;
-  $("#generationMode").textContent = ticket.generation_mode === "llm_grounded"
-    ? "大模型 · 证据约束"
-    : ticket.generation_mode === "extractive_grounded"
-      ? "本地抽取 · 证据约束"
-      : "安全兜底策略";
-  $("#resultConfidence").textContent = `${Math.round(ticket.confidence * 100)}%`;
-  $("#resultRelevance").textContent = `${Math.round(ticket.relevance * 100)}%`;
-  requestAnimationFrame(() => {
-    $("#confidenceBar").style.width = `${Math.round(ticket.confidence * 100)}%`;
-    $("#relevanceBar").style.width = `${Math.round(ticket.relevance * 100)}%`;
-  });
-  $("#reasonList").innerHTML = [
-    ...ticket.reasons,
-    explanation,
-  ].map((reason) => `<li>${escapeHTML(reason)}</li>`).join("");
-  const citations = ticket.citations || [];
-  $("#citationCount").textContent = `${citations.length} 条`;
-  $("#citationList").innerHTML = citations.length
-    ? citations.map((citation, index) => `
-      <details class="citation-item" ${index === 0 ? "open" : ""}>
-        <summary>${escapeHTML(citation.title)}<span>${Math.round(citation.relevance * 100)}%</span></summary>
-        <p>${escapeHTML(citation.snippet)}</p>
-      </details>`).join("")
-    : '<div class="empty-state mini">未召回可靠知识，已触发安全兜底。</div>';
-  $("#resultPanel").scrollIntoView({ behavior: "smooth", block: "start" });
-  loadMetrics();
-  loadRecent();
+function renderTrace() {
+  if (!state.trace.length && !state.toolCalls.length) {
+    $("#panel-trace").innerHTML = `
+      <div class="panel-empty">
+        <span class="panel-empty-mark">↳</span>
+        <p>Agent 正在准备执行。</p>
+      </div>`;
+    return;
+  }
+  const traceHTML = state.trace.map((item) => `
+    <li class="trace-item">
+      <strong>${escapeHTML(item.node)}</strong>
+      <span>${escapeHTML(item.detail || "")}</span>
+    </li>`).join("");
+  const toolsHTML = state.toolCalls.map((tool) => `
+    <div class="tool-summary">
+      <p><strong>${escapeHTML(tool.name)}</strong> · ${escapeHTML(tool.status)}
+      · ${Number(tool.duration_ms || 0).toFixed(2)} ms</p>
+    </div>`).join("");
+  $("#panel-trace").innerHTML = `
+    <ul class="trace-list">${traceHTML}</ul>
+    ${toolsHTML}`;
 }
 
-async function submitRequest(event) {
-  event.preventDefault();
-  const message = $("#messageInput").value.trim();
-  if (!message) return;
-  $("#loadingMask").classList.remove("is-hidden");
-  $("#submitButton").disabled = true;
+function renderSources() {
+  if (!state.sourceCards.length) {
+    $("#panel-sources").innerHTML = `
+      <div class="panel-empty">
+        <span class="panel-empty-mark">⌕</span>
+        <p>本次没有找到可靠知识来源。</p>
+      </div>`;
+    return;
+  }
+  $("#panel-sources").innerHTML = state.sourceCards.map((source) => `
+    <details class="source-card" open>
+      <summary>
+        ${escapeHTML(source.title || source.source || "知识来源")}
+        ${source.id ? `<small>${escapeHTML(source.id)}</small>` : ""}
+      </summary>
+      <p>${escapeHTML(source.snippet || source.source || "")}</p>
+    </details>`).join("");
+}
+
+function updateInspector(finalPayload) {
+  const retrieval = finalPayload.retrieval || {};
+  const agent = retrieval.agent || {};
+  state.trace = agent.trace || [];
+  state.toolCalls = agent.tool_calls || [];
+  state.sourceCards = finalPayload.ticket?.citations || [];
+  renderTrace();
+  renderSources();
+
+  const model = retrieval.model || {};
+  $("#statModel").textContent = model.model || finalPayload.ticket?.generation_mode || "本地模式";
+  $("#statLatency").textContent = model.latency_ms
+    ? `${Math.round(model.latency_ms)} ms`
+    : "—";
+  $("#statTokens").textContent = model.usage?.total_tokens ?? "—";
+  setPanel("sources");
+  loadTickets();
+}
+
+function parseSSEBlock(block) {
+  const lines = block.split(/\r?\n/);
+  let event = "message";
+  const dataLines = [];
+  for (const line of lines) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+  }
+  if (!dataLines.length) return null;
   try {
-    const payload = await api("/api/assist", {
+    return { event, data: JSON.parse(dataLines.join("\n")) };
+  } catch {
+    return { event, data: { raw: dataLines.join("\n") } };
+  }
+}
+
+async function sendMessage(event) {
+  event.preventDefault();
+  const input = $("#messageInput");
+  const message = input.value.trim();
+  if (!message || state.busy) return;
+
+  state.busy = true;
+  $("#sendButton").disabled = true;
+  appendMessage("user", message);
+  const assistant = appendMessage("assistant", "", true);
+  let answer = "";
+  state.trace = [];
+  state.toolCalls = [];
+  renderTrace();
+  input.value = "";
+  autoResizeInput();
+
+  try {
+    const response = await fetch("/api/chat/stream", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         message,
-        customer_name: $("#customerInput").value,
-        customer_tier: $("#tierInput").value,
-        order_id: $("#orderInput").value,
+        session_id: state.sessionId,
+        customer_name: "工作台用户",
+        customer_tier: "standard",
+        order_id: "",
       }),
     });
-    renderResult(payload);
-    toast("分流完成，工单已记录");
+    if (!response.ok || !response.body) {
+      const errorPayload = await response.json().catch(() => ({}));
+      throw new Error(errorPayload.error || errorPayload.detail || "流式请求失败");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let completed = false;
+
+    while (!completed) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split(/\r?\n\r?\n/);
+      buffer = blocks.pop() || "";
+      for (const block of blocks) {
+        const parsed = parseSSEBlock(block);
+        if (!parsed) continue;
+        const { event: eventName, data } = parsed;
+        if (eventName === "session") {
+          state.sessionId = data.session_id;
+        }
+        if (eventName === "node") {
+          state.trace.push(data);
+          renderTrace();
+        }
+        if (eventName === "answer_delta") {
+          assistant.article.classList.remove("is-loading");
+          answer += data.delta || "";
+          assistant.bubble.textContent = answer;
+          scrollToBottom();
+        }
+        if (eventName === "final") {
+          completed = true;
+          assistant.article.classList.add("is-complete");
+          assistant.article.classList.remove("is-loading");
+          assistant.bubble.innerHTML = answerMarkup(data.ticket?.answer || answer);
+          updateInspector(data);
+          loadSessions();
+        }
+        if (eventName === "error") {
+          throw new Error(data.error || "Agent 执行失败");
+        }
+      }
+    }
+    if (!completed) {
+      assistant.article.classList.add("is-complete");
+      assistant.article.classList.remove("is-loading");
+      assistant.bubble.textContent = answer || "响应意外中断，请重新尝试。";
+    }
   } catch (error) {
+    assistant.article.classList.add("is-complete");
+    assistant.article.classList.remove("is-loading");
+    assistant.bubble.textContent = `请求失败：${error.message}`;
     toast(error.message);
   } finally {
-    $("#loadingMask").classList.add("is-hidden");
-    $("#submitButton").disabled = false;
-  }
-}
-
-async function sendFeedback(rating) {
-  if (!state.currentTicketId || state.feedbackSent) return;
-  try {
-    await api(`/api/tickets/${encodeURIComponent(state.currentTicketId)}/feedback`, {
-      method: "POST",
-      body: JSON.stringify({ rating }),
-    });
-    state.feedbackSent = true;
-    toast("反馈已记录，将用于后续优化");
-    loadMetrics();
-  } catch (error) {
-    toast(error.message);
-  }
-}
-
-async function loadTickets() {
-  const status = $("#ticketStatusFilter").value;
-  try {
-    const data = await api(`/api/tickets?limit=100${status ? `&status=${encodeURIComponent(status)}` : ""}`);
-    const items = data.items || [];
-    if (!items.length) {
-      $("#ticketTable").innerHTML = '<div class="empty-state">当前筛选条件下没有工单。</div>';
-      return;
-    }
-    $("#ticketTable").innerHTML = items.map((ticket) => `
-      <div class="table-row">
-        <div class="ticket-cell">
-          <strong>${escapeHTML(ticket.id)} · ${escapeHTML(ticket.customer_name)}</strong>
-          <small title="${escapeHTML(ticket.message_masked)}">${escapeHTML(ticket.message_masked)}</small>
-        </div>
-        <span>${escapeHTML(ticket.category_label)}</span>
-        <span class="priority-pill ${escapeHTML(ticket.priority)}">${escapeHTML(ticket.priority)}</span>
-        <span class="status-cell">
-          <span class="status-pill ${escapeHTML(ticket.status)}">${escapeHTML(statusLabels[ticket.status] || ticket.status)}</span>
-          ${["pending_agent", "escalated"].includes(ticket.status)
-            ? `<button class="resolve-action" data-resolve="${escapeHTML(ticket.id)}" type="button">标记解决</button>`
-            : ""}
-        </span>
-        <span>${escapeHTML(ticket.assigned_team)}</span>
-        <span>${formatTime(ticket.created_at)}</span>
-      </div>`).join("");
-  } catch (error) {
-    toast(error.message);
-  }
-}
-
-async function resolveTicket(ticketId, button) {
-  button.disabled = true;
-  try {
-    await api(`/api/tickets/${encodeURIComponent(ticketId)}/status`, {
-      method: "POST",
-      body: JSON.stringify({ status: "resolved" }),
-    });
-    toast(`${ticketId} 已标记为解决`);
-    await Promise.all([loadTickets(), loadMetrics(), loadRecent()]);
-  } catch (error) {
-    button.disabled = false;
-    toast(error.message);
+    state.busy = false;
+    $("#sendButton").disabled = false;
+    input.focus();
+    scrollToBottom();
   }
 }
 
 async function loadKnowledge() {
   try {
-    const data = await api("/api/knowledge");
-    const items = data.items || [];
-    $("#knowledgeGrid").innerHTML = items.map((doc) => `
-      <article class="knowledge-card">
-        <div class="knowledge-card-head">
-          <div class="doc-type">KB</div>
-          <span class="privacy-badge">${escapeHTML(categoryColors[doc.category] || doc.category)}</span>
-        </div>
-        <h3>${escapeHTML(doc.title)}</h3>
-        <p>${escapeHTML(doc.id)}</p>
-        <div class="knowledge-meta">
-          <span>${escapeHTML(doc.team)}</span>
-          <span>${doc.chunks} 个切片</span>
-        </div>
-      </article>`).join("");
+    const [docs, staticDocs] = await Promise.all([
+      api("/api/documents"),
+      api("/api/knowledge"),
+    ]);
+    const uploaded = docs.items || [];
+    const knowledge = staticDocs.items || [];
+    $("#knowledgeCount").textContent = String(knowledge.length);
+    $("#knowledgeList").innerHTML = knowledge.map((doc) => `
+      <div class="side-item">
+        <strong>${escapeHTML(doc.title)}</strong>
+        <span>${escapeHTML(doc.team)} · ${doc.chunks} 个切片</span>
+        <span class="badge">${escapeHTML(categoryLabels[doc.category] || doc.category)}</span>
+      </div>`).join("") || '<div class="panel-empty"><p>还没有知识文档。</p></div>';
+    if (!uploaded.length) return;
+    $("#knowledgeCount").textContent = String(knowledge.length);
   } catch (error) {
-    toast(error.message);
+    $("#knowledgeList").innerHTML = `<div class="panel-empty"><p>${escapeHTML(error.message)}</p></div>`;
   }
 }
 
-async function reloadKnowledge() {
+async function loadTickets() {
   try {
-    const result = await api("/api/knowledge/reload", { method: "POST", body: "{}" });
-    toast(`知识索引已更新：${result.knowledge_chunks} 个切片`);
-    loadKnowledge();
+    const [tickets, metrics] = await Promise.all([
+      api("/api/tickets?limit=8"),
+      api("/api/metrics"),
+    ]);
+    $("#ticketCount").textContent = String(metrics.total || 0);
+    const items = tickets.items || [];
+    $("#ticketList").innerHTML = items.length
+      ? items.map((ticket) => `
+        <div class="side-item">
+          <strong>${escapeHTML(ticket.id)}</strong>
+          <span>${escapeHTML(ticket.category_label)} · ${escapeHTML(ticket.priority)} · ${escapeHTML(ticket.status)}</span>
+          <span>${escapeHTML(ticket.message_masked).slice(0, 48)}…</span>
+        </div>`).join("")
+      : '<div class="panel-empty"><p>还没有工单记录。</p></div>';
+  } catch (error) {
+    $("#ticketList").innerHTML = `<div class="panel-empty"><p>${escapeHTML(error.message)}</p></div>`;
+  }
+}
+
+async function loadEvaluation() {
+  try {
+    const data = await api("/api/evaluation");
+    $("#evaluationList").innerHTML = `
+      <div class="eval-summary">
+        <div><span>分类准确率</span><strong>${(data.category_accuracy * 100).toFixed(1)}%</strong></div>
+        <div><span>优先级准确率</span><strong>${(data.priority_accuracy * 100).toFixed(1)}%</strong></div>
+      </div>
+      ${data.retrieval_modes.map((mode) => `
+        <div class="eval-row">
+          <div class="eval-row-head">
+            <span>${escapeHTML(mode.name)}</span>
+            <span>Hit@1 ${(mode.hit_at_1 * 100).toFixed(1)}%</span>
+          </div>
+          <div class="eval-bar"><i style="width:${mode.hit_at_1 * 100}%"></i></div>
+          <small>Hit@3 ${(mode.hit_at_3 * 100).toFixed(1)}% · MRR ${mode.mrr_at_5.toFixed(3)} · ${mode.average_latency_ms.toFixed(2)} ms</small>
+        </div>`).join("")}`;
+  } catch (error) {
+    $("#evaluationList").innerHTML = `<div class="panel-empty"><p>${escapeHTML(error.message)}</p></div>`;
+  }
+}
+
+async function loadStatus() {
+  try {
+    const [health, model] = await Promise.all([
+      api("/api/health"),
+      api("/api/model/info"),
+    ]);
+    $("#statusDot").classList.add("is-online");
+    $("#statusTitle").textContent = `${health.knowledge_chunks} 个知识切片已就绪`;
+    $("#statusSubtitle").textContent = `${health.tool_count} 个 Agent 工具 · LangGraph`;
+    $("#modelPill").textContent = model.configured
+      ? `${model.model} · 在线`
+      : "离线回退模式";
+  } catch (error) {
+    $("#statusDot").classList.add("is-error");
+    $("#statusTitle").textContent = "服务连接失败";
+    $("#statusSubtitle").textContent = error.message;
+  }
+}
+
+function setPanel(name) {
+  $$(".tab").forEach((tab) => tab.classList.toggle("is-active", tab.dataset.tab === name));
+  $$(".panel").forEach((panel) => panel.classList.toggle("is-active", panel.id === `panel-${name}`));
+}
+
+function autoResizeInput() {
+  const input = $("#messageInput");
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, 150)}px`;
+}
+
+function openUpload() {
+  $("#uploadModal").classList.add("is-open");
+  $("#uploadModal").setAttribute("aria-hidden", "false");
+  setTimeout(() => $("#documentFile").focus(), 50);
+}
+
+function closeUpload() {
+  $("#uploadModal").classList.remove("is-open");
+  $("#uploadModal").setAttribute("aria-hidden", "true");
+}
+
+async function submitUpload(event) {
+  event.preventDefault();
+  const file = $("#documentFile").files[0];
+  if (!file) {
+    toast("请先选择文档");
+    return;
+  }
+  const button = $("#uploadSubmit");
+  button.disabled = true;
+  button.textContent = "正在解析并建立索引…";
+  const form = new FormData();
+  form.append("file", file);
+  form.append("title", $("#documentTitle").value);
+  form.append("category", $("#documentCategory").value);
+  form.append("team", $("#documentTeam").value);
+  try {
+    const result = await api("/api/documents", { method: "POST", body: form });
+    toast(`已加入知识库：${result.document.chunk_count} 个切片`);
+    closeUpload();
+    $("#uploadForm").reset();
+    $("#fileName").textContent = "尚未选择文件";
+    await Promise.all([loadKnowledge(), loadStatus()]);
+    setPanel("knowledge");
   } catch (error) {
     toast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "解析并加入知识库";
   }
 }
 
 function init() {
-  $("#todayLabel").textContent = new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric", month: "long", day: "numeric", weekday: "long",
-  }).format(new Date());
-  $("#triageForm").addEventListener("submit", submitRequest);
-  $("#messageInput").addEventListener("input", () => {
-    $("#charCount").textContent = $("#messageInput").value.length;
+  $("#chatForm").addEventListener("submit", sendMessage);
+  $("#messageInput").addEventListener("input", autoResizeInput);
+  $("#messageInput").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      $("#chatForm").requestSubmit();
+    }
   });
-  $$(".sample-chip").forEach((button) => {
-    button.addEventListener("click", () => {
-      $("#messageInput").value = button.dataset.sample;
-      $("#messageInput").dispatchEvent(new Event("input"));
-      $("#messageInput").focus();
+  $("#newChatButton").addEventListener("click", startNewChat);
+  $("#refreshSessions").addEventListener("click", loadSessions);
+  $("#openUpload").addEventListener("click", openUpload);
+  $("#panelUpload").addEventListener("click", openUpload);
+  $("#closeUpload").addEventListener("click", closeUpload);
+  $("#uploadModal").addEventListener("click", (event) => {
+    if (event.target === $("#uploadModal")) closeUpload();
+  });
+  $("#uploadForm").addEventListener("submit", submitUpload);
+  $("#documentFile").addEventListener("change", () => {
+    const file = $("#documentFile").files[0];
+    $("#fileName").textContent = file ? file.name : "尚未选择文件";
+    if (file && !$("#documentTitle").value) {
+      $("#documentTitle").value = file.name.replace(/\.[^.]+$/, "");
+    }
+  });
+  $$(".prompt-card").forEach((card) => {
+    card.addEventListener("click", () => {
+      $("#messageInput").value = card.dataset.prompt;
+      autoResizeInput();
+      $("#chatForm").requestSubmit();
     });
   });
-  $$(".nav-item").forEach((item) => item.addEventListener("click", () => setView(item.dataset.view)));
-  $$("[data-jump]").forEach((item) => item.addEventListener("click", () => setView(item.dataset.jump)));
-  $("#refreshButton").addEventListener("click", () => {
-    loadMetrics();
-    loadRecent();
-    toast("数据已刷新");
+  $$(".tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      setPanel(tab.dataset.tab);
+      if (tab.dataset.tab === "knowledge") loadKnowledge();
+      if (tab.dataset.tab === "tickets") loadTickets();
+      if (tab.dataset.tab === "evaluation") loadEvaluation();
+    });
   });
-  $("#ticketStatusFilter").addEventListener("change", loadTickets);
-  $("#reloadKnowledge").addEventListener("click", reloadKnowledge);
-  $$("[data-rating]").forEach((button) => {
-    button.addEventListener("click", () => sendFeedback(button.dataset.rating));
+  $$("[data-panel]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setPanel(button.dataset.panel);
+      if (button.dataset.panel === "knowledge") loadKnowledge();
+      if (button.dataset.panel === "tickets") loadTickets();
+      $("#inspector").classList.add("is-open");
+    });
   });
-  document.addEventListener("click", (event) => {
-    const resolveButton = event.target.closest("[data-resolve]");
-    if (resolveButton) {
-      event.stopPropagation();
-      resolveTicket(resolveButton.dataset.resolve, resolveButton);
-      return;
-    }
-    const ticketButton = event.target.closest("[data-ticket]");
-    if (ticketButton) setView("tickets");
-  });
-  loadMetrics();
-  loadRecent();
+  $("#openInspectorMobile").addEventListener("click", () => $("#inspector").classList.add("is-open"));
+  $("#closeInspectorMobile").addEventListener("click", () => $("#inspector").classList.remove("is-open"));
+  $("#refreshTickets").addEventListener("click", loadTickets);
+  $("#refreshEvaluation").addEventListener("click", loadEvaluation);
+
+  loadStatus();
+  loadSessions();
+  loadKnowledge();
+  loadTickets();
+  autoResizeInput();
+  $("#messageInput").focus();
 }
 
 document.addEventListener("DOMContentLoaded", init);
-

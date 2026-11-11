@@ -10,20 +10,25 @@
 4. 如果无法可靠回答，应该去哪个团队；
 5. 答复、来源、判断理由和反馈如何留痕。
 
-项目要求零配置可演示，因此默认只使用 Python 标准库。模型调用被设计为可选的最后一步，而不是主流程的单点依赖。
+项目要求没有模型密钥时仍可演示，因此保留本地抽取式回退。在线模型是可替换的
+回答生成器，业务风险判断、工具权限和工单状态不能由模型直接覆盖。
 
 ## 组件
 
 | 组件 | 文件 | 职责 |
 | --- | --- | --- |
 | HTTP API | `serviceflow/api.py` | FastAPI 路由、JSON API、参数校验、OpenAPI 文档 |
-| 分流引擎 | `serviceflow/engine.py` | 串联脱敏、分类、检索、答复和策略 |
+| Agent 引擎 | `serviceflow/engine.py` | LangGraph 编排分类、检索、答复、工具和条件路由 |
 | 意图分类 | `serviceflow/classifier.py` | 7 类意图、P0-P3、风险信号和解释 |
-| 知识检索 | `serviceflow/knowledge.py` | Markdown 切片、索引、BM25、引用句抽取 |
+| 知识检索 | `serviceflow/knowledge.py` | Markdown 切片、BM25、离线向量和混合排序 |
+| 查询与重排 | `serviceflow/retrieval.py` | 业务查询改写、上下文拼接和启发式 Rerank |
+| 文档入库 | `serviceflow/documents.py` | 上传、编码识别、切分和文档持久化 |
+| 会话记忆 | `serviceflow/sessions.py` | 多轮消息、历史加载和追问上下文 |
+| Agent 工具 | `serviceflow/tools.py` | 检索、查单、建单、转人工和调用记录 |
 | 隐私处理 | `serviceflow/pii.py` | 标识符检测、脱敏哈希 |
 | 工单存储 | `serviceflow/storage.py` | SQLite 事务、筛选、反馈和指标 |
-| 模型适配 | `serviceflow/llm.py` | OpenAI 兼容接口与安全回退 |
-| 工作台 | `web/` | 人工操作、工单与知识展示 |
+| 模型适配 | `serviceflow/llm.py` | OpenAI 兼容调用、流式 Token、重试和用量统计 |
+| 工作台 | `web/` | 流式对话、引用、工具轨迹、知识上传和工单展示 |
 
 ## 请求时序
 
@@ -31,25 +36,25 @@
 sequenceDiagram
     participant U as 运营人员
     participant A as HTTP API
-    participant E as TriageEngine
+    participant E as LangGraph
     participant C as Classifier
     participant K as KnowledgeBase
     participant S as SQLite
+    participant M as Model API
 
-    U->>A: POST /api/assist
-    A->>E: assist(message, tier)
-    E->>E: PII 脱敏
+    U->>A: POST /api/chat/stream
+    A->>E: message + session history
+    E->>E: PII 脱敏 + prepare
     E->>C: 意图、优先级、风险判断
     C-->>E: category + confidence + priority
-    E->>K: 类目优先检索
-    K-->>E: top-k chunks + relevance
+    E->>K: knowledge_search 工具
+    K-->>E: chunks + lexical/vector/rerank scores
+    E->>M: 仅发送已验证证据
+    M-->>A: token SSE
     E->>E: 自动答复 / 人工复核 / 升级
-    opt 可选模型
-        E->>E: 仅向模型提供检索证据
-    end
-    E->>S: 写入脱敏工单、答复、引用、理由
+    E->>S: create_ticket / handoff_ticket 工具
     S-->>A: ticket
-    A-->>U: decision + ticket + explanation
+    A-->>U: node/answer/final SSE
 ```
 
 ## 分流策略
@@ -97,7 +102,13 @@ team: 售后服务组
 ---
 ```
 
-正文按空行切片。中文检索同时保留单字和二元词，英文与编号保留完整 token；使用 BM25 计算词项相关度，并按业务类目加权。最终相关性还包含查询词项覆盖率，减少“一个常用字碰巧命中”的误召回。
+正文按段落聚合，单块不超过 700 字并保留 80 字重叠。中文检索同时保留单字
+和二元词，英文与编号保留完整 token；使用 BM25 计算词项相关度，并叠加离线
+哈希向量分数。查询先经过保守的同义词扩展，再进入混合召回和 Rerank。
+
+离线哈希向量不是神经语义模型，只用于建立可替换的工程基线和离线演示。57 条
+评测显示它单独使用弱于关键词检索，因此生产默认只给较低权重。后续可替换为
+中文 Embedding 和 Cross-Encoder，而不改变 Agent 与 API。
 
 返回答案始终包含来源文档、段落和相关性；模型只收到这些段落，不直接读取整个知识库。
 
@@ -111,6 +122,10 @@ SQLite 保存：
 - 工单状态、负责团队、答复、引用和判断理由；
 - 反馈记录。
 
+同一数据库还保存上传文档、文档切片和会话消息。追问只有在当前问题较短或包含
+“那、这个、超过、怎么办”等指代表达时，才会拼接最近两轮用户问题，避免历史
+上下文污染独立提问。
+
 原始问题仍然保留是为了复盘误分类，但 API 展示默认使用脱敏文本。生产环境应进一步拆分敏感数据存储、设置访问权限和自动过期策略。
 
 ## 可观测性
@@ -122,6 +137,10 @@ SQLite 保存：
 - 类目分布；
 - 优先级分布；
 - 用户有帮助率。
+- 模型名称、调用尝试次数、响应耗时和 Token 用量；
+- LangGraph 节点轨迹；
+- 每个 Agent 工具的参数、状态、耗时和输出摘要；
+- 57 条离线评测的分类、优先级、Hit@K、MRR 和平均检索耗时。
 
 生产环境还应增加：
 
@@ -143,14 +162,17 @@ SQLite 保存：
 - 前端内容 HTML 转义；
 - PII 入库前脱敏；
 - 低证据不生成事实性答案。
+- API Key 仅从环境变量或被 Git 忽略的 `.env` 读取；
+- 模型调用包含超时、有限重试和并发上限；
+- 自动答复与人工交接由服务端策略决定。
 
 部署前必须补充：
 
-- 登录与会话管理；
+- 正式登录与租户隔离；
 - RBAC 和审计日志；
 - HTTPS；
 - 限流和 CSRF 策略；
 - PostgreSQL 与备份；
-- 密钥管理；
+- 云端密钥托管和轮换；
 - 数据保留与删除策略。
 

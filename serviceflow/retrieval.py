@@ -11,6 +11,7 @@ REWRITE_RULES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("报销", "票据", "发票"), ("报销", "凭证", "审核")),
     (("到账", "退回", "退款"), ("退款", "到账", "时效")),
     (("多久", "几天", "什么时候"), ("时效", "工作日")),
+    (("有人回复", "人工响应"), ("人工响应", "服务时间")),
     (("登录不上", "登不上", "无法登录"), ("登录失败", "验证码", "账号")),
     (("续费", "订阅"), ("自动续费", "取消订阅", "账单")),
     (("扣款", "扣钱"), ("重复扣款", "支付", "账单")),
@@ -98,9 +99,9 @@ def heuristic_rerank(
         title_terms = set(tokenize(item.chunk.title))
         title_coverage = len(query_terms & title_terms) / max(len(query_terms), 1)
         score = (
-            0.82 * item.hybrid_relevance
-            + 0.12 * title_coverage
-            + 0.06 * item.coverage
+            0.94 * item.hybrid_relevance
+            + 0.04 * title_coverage
+            + 0.02 * item.coverage
         )
         item.rerank_score = round(min(0.99, score), 4)
         item.relevance = item.rerank_score

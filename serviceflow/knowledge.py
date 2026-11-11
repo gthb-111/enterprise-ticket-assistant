@@ -62,14 +62,14 @@ class KnowledgeBase:
     _doc_frequency: dict[str, int] = field(default_factory=dict)
     _avg_length: float = 0.0
     _vectors: list[list[float]] = field(default_factory=list)
-    vector_weight: float = 0.35
+    vector_weight: float = 0.1
     vector_dimensions: int = 512
 
     @classmethod
     def load(
         cls,
         directory: Path,
-        vector_weight: float = 0.35,
+        vector_weight: float = 0.1,
         vector_dimensions: int = 512,
     ) -> "KnowledgeBase":
         kb = cls(
@@ -131,7 +131,10 @@ class KnowledgeBase:
         query: str,
         category: str | None = None,
         top_k: int = 4,
+        mode: str = "hybrid",
     ) -> list[RetrievedChunk]:
+        if mode not in {"lexical", "vector", "hybrid"}:
+            raise ValueError("Unsupported retrieval mode")
         terms = unique_terms(tokenize(query))
         if not terms:
             return []
@@ -158,29 +161,38 @@ class KnowledgeBase:
             if category and chunk.category == category:
                 score *= 1.28
             vector_score = _cosine(query_vector, self._vectors[index])
+            coverage = min(1.0, matched_weight / total_weight)
+            lexical_relevance = 0.0
             if score > 0:
-                coverage = min(1.0, matched_weight / total_weight)
-                if coverage >= 0.12:
-                    lexical_relevance = 0.0
-                    raw = score / (score + 5.0)
-                    lexical_relevance = min(
-                        0.99, 0.58 * raw + 0.42 * coverage
-                    )
+                lexical_relevance = min(
+                    0.99, 0.58 * (score / (score + 5.0)) + 0.42 * coverage
+                )
+            eligible = False
+            relevance = 0.0
+            if mode == "vector":
+                eligible = vector_score >= 0.03
+                relevance = vector_score
+            elif score > 0 and coverage >= 0.12:
+                eligible = True
+                if mode == "lexical":
+                    relevance = lexical_relevance
+                else:
                     relevance = (
                         (1.0 - self.vector_weight) * lexical_relevance
                         + self.vector_weight * vector_score
                     )
-                    scored.append(
-                        RetrievedChunk(
-                            chunk=chunk,
-                            score=score,
-                            coverage=coverage,
-                            vector_score=round(vector_score, 4),
-                            lexical_relevance=round(lexical_relevance, 4),
-                            hybrid_relevance=round(min(0.99, relevance), 3),
-                            relevance=round(min(0.99, relevance), 3),
-                        )
+            if eligible:
+                scored.append(
+                    RetrievedChunk(
+                        chunk=chunk,
+                        score=score,
+                        coverage=coverage,
+                        vector_score=round(vector_score, 4),
+                        lexical_relevance=round(lexical_relevance, 4),
+                        hybrid_relevance=round(min(0.99, relevance), 3),
+                        relevance=round(min(0.99, relevance), 3),
                     )
+                )
         scored.sort(key=lambda item: item.relevance, reverse=True)
         return scored[:top_k]
 

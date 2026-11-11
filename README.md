@@ -2,10 +2,10 @@
 
 一个可直接运行的服务运营项目：接收客户问题后，通过 LangGraph 编排敏感信息脱敏、业务意图识别、风险与紧急度评估、知识库检索、带来源答复、人工升级和工单沉淀。
 
+![ServiceFlow AI 工作台](docs/workbench.png)
+
 项目使用 FastAPI 提供服务，默认不需要联网或 API Key；在 `.env`
 配置 OpenAI 兼容模型后，可在原有证据约束流程上启用生成式回答。
-
-![ServiceFlow AI 工作台](docs/workspace-screenshot.png)
 
 ## 为什么做
 
@@ -24,7 +24,7 @@ ServiceFlow AI 将这些决策放在同一条可审计的流水线里。
 - **工单分流**：账单、账号、物流、退款、技术、投诉、通用咨询 7 类意图。
 - **优先级策略**：P0-P3 分级；资金安全、账号被盗、监管投诉等风险强制升级。
 - **混合知识检索**：查询改写、BM25、离线哈希向量和启发式 Rerank 组合排序，支持类目加权和段落级来源。
-- **文档入库**：通过 API 上传 Markdown 或 TXT 文档，解析、切分并持久化到知识索引。
+- **文档入库**：上传 Markdown、TXT、PDF 或 DOCX，解析、切分并持久化到知识索引。
 - **安全答复**：低相关性、低置信和高风险请求不会被直接自动回复。
 - **可选大模型**：仅使用检索证据生成答复；模型超时或不可用时回退到本地抽取式答案。
 - **隐私保护**：手机号、邮箱、证件号、银行卡号和常见订单号在入库前脱敏。
@@ -59,6 +59,17 @@ python -m venv .venv
 ```powershell
 .\.venv\Scripts\python.exe run.py assist --message "退款审核通过后多久到账？" --tier vip
 ```
+
+## Docker 运行
+
+先准备 `.env`，再执行：
+
+```powershell
+docker compose up --build
+```
+
+数据保存在 Docker volume 中。当前开发机未安装 Docker，因此镜像定义已提供，
+但尚未在本机完成容器启动验证。
 
 ## 可选模型配置
 
@@ -138,22 +149,31 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8877/api/assist" `
 ## 测试与评测
 
 ```powershell
-python -m unittest discover -s tests -v
-python scripts\evaluate.py
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe scripts\evaluate.py --output docs\evaluation-results.json
 ```
 
-当前基线来自 21 条人工编写的领域问法：
+当前基线来自 57 条人工编写的领域问法：
 
 | 指标 | 结果 | 口径 |
 | --- | ---: | --- |
-| 意图分类准确率 | 100% | 21 条内部评测问法 |
+| 意图分类准确率 | 100% | 57 条内部评测问法 |
 | 意图 Macro-F1 | 100% | 7 个业务类目 |
-| 知识 Hit@1 | 100% | 是否命中期望文档 |
-| 知识 Hit@3 | 100% | Top 3 是否包含期望文档 |
-| 优先级准确率 | 100% | 21 条评测问法回归通过 |
+| 混合检索 + Rerank Hit@1 | 98.25% | 是否命中期望文档 |
+| 混合检索 + Rerank Hit@3 | 100% | Top 3 是否包含期望文档 |
+| 混合检索 MRR@5 | 99.12% | 首个正确文档的平均倒数排名 |
+| 优先级准确率 | 100% | 57 条评测问法回归通过 |
 | 优先级降级漏判 | 0 条 | 真实优先级高于系统判断 |
 
-这是小规模合成评测，只用于回归和展示，不代表生产流量准确率。评测脚本在 [scripts/evaluate.py](scripts/evaluate.py)，数据在 [data/evaluation.jsonl](data/evaluation.jsonl)。
+同一脚本会对比 `lexical`、`vector`、`hybrid`、`hybrid_rerank` 四种检索模式。
+当前离线哈希向量在 Hit@1 上低于关键词基线，而混合检索与 Rerank 达到了关键词
+基线的同等 Hit@1，同时保留了替换真实语义 Embedding 的接口。
+
+57 条问题和规则来自同一批人工建设数据，并用于调参，因此只能视为回归和方案
+验证，不能代表模型或规则在真实流量上的泛化效果。下一阶段应使用独立测试集和
+真实工单做盲测。评测脚本与结果分别位于
+[scripts/evaluate.py](scripts/evaluate.py) 和
+[docs/evaluation-results.json](docs/evaluation-results.json)。
 
 ## 目录
 
@@ -161,7 +181,7 @@ python scripts\evaluate.py
 enterprise-ticket-assistant/
 ├─ serviceflow/          # 分流、检索、策略、存储、HTTP API
 ├─ knowledge/            # 可热更新的 Markdown 知识库
-├─ web/                  # 无构建步骤的响应式工作台
+├─ web/                  # 响应式知识库问答与 Agent 工作台
 ├─ tests/                # 单元与端到端业务流测试
 ├─ scripts/evaluate.py   # 离线分类/检索评测
 ├─ data/evaluation.jsonl
@@ -171,7 +191,8 @@ enterprise-ticket-assistant/
 ## 设计边界
 
 - 规则分类器可解释、启动快，但同义表达泛化能力弱于经过标注数据训练的模型；生产环境应接入真实工单数据，对比规则、传统分类模型与语义向量模型。
-- 当前 BM25 检索适合中小型知识库。文档规模扩大后，可接入向量检索并保留关键词召回作为 hybrid search。
+- 当前向量使用离线哈希基线，不等同于神经语义 Embedding；真实部署应替换为
+  独立评估过的中文 Embedding 与 Rerank 模型。
 - SQLite 适合单机展示和小团队内部工具。多实例部署时应迁移到 PostgreSQL，并增加登录、RBAC、审计和消息队列。
 - 当前服务没有外部身份认证，不应直接暴露在公网。
 

@@ -1,9 +1,75 @@
 {
-  "cases": 21,
+  "cases": 57,
   "category_accuracy": 1.0,
   "category_macro_f1": 1.0,
-  "retrieval_hit_at_1": 1.0,
+  "retrieval_hit_at_1": 0.9825,
   "retrieval_hit_at_3": 1.0,
+  "retrieval_mrr_at_5": 0.9912,
+  "retrieval_modes": [
+    {
+      "name": "lexical",
+      "hit_at_1": 0.9825,
+      "hit_at_3": 1.0,
+      "mrr_at_5": 0.9912,
+      "average_latency_ms": 1.214,
+      "failures": []
+    },
+    {
+      "name": "vector",
+      "hit_at_1": 0.8947,
+      "hit_at_3": 0.9474,
+      "mrr_at_5": 0.9275,
+      "average_latency_ms": 1.273,
+      "failures": [
+        {
+          "query": "包裹运输五天没有物流更新",
+          "expected_document": "logistics_delay",
+          "rank": 5,
+          "retrieved_documents": [
+            "system_500",
+            "package_incident",
+            "package_incident"
+          ]
+        },
+        {
+          "query": "包裹一直没有动静，我想申请改派",
+          "expected_document": "logistics_delay",
+          "rank": 12,
+          "retrieved_documents": [
+            "package_incident",
+            "service_hours",
+            "complaint_escalation"
+          ]
+        },
+        {
+          "query": "企业全员无法登录后台，已经影响今天的结算",
+          "expected_document": "system_500",
+          "rank": 4,
+          "retrieved_documents": [
+            "password_reset",
+            "password_reset",
+            "password_reset"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "hybrid",
+      "hit_at_1": 0.9825,
+      "hit_at_3": 1.0,
+      "mrr_at_5": 0.9912,
+      "average_latency_ms": 1.213,
+      "failures": []
+    },
+    {
+      "name": "hybrid_rerank",
+      "hit_at_1": 0.9825,
+      "hit_at_3": 1.0,
+      "mrr_at_5": 0.9912,
+      "average_latency_ms": 1.291,
+      "failures": []
+    }
+  ],
   "priority_accuracy": 1.0,
   "priority_under_escalated": 0,
   "priority_over_escalated": 0,
@@ -18,27 +84,52 @@
   },
   "confusion": {
     "billing": {
-      "billing": 6
+      "billing": 15
     },
     "refund": {
-      "refund": 4
+      "refund": 10
     },
     "logistics": {
-      "logistics": 4
+      "logistics": 10
     },
     "account": {
-      "account": 3
+      "account": 9
     },
     "technical": {
-      "technical": 2
+      "technical": 5
     },
     "service": {
-      "service": 1
+      "service": 4
     },
     "general": {
-      "general": 1
+      "general": 4
     }
   },
-  "failures": [],
+  "failures": [
+    {
+      "query": "包裹一直没有动静，我想申请改派",
+      "expected_category": "logistics",
+      "predicted_category": "logistics",
+      "expected_document": "logistics_delay",
+      "retrieved_documents": [
+        "package_incident",
+        "logistics_delay",
+        "logistics_delay"
+      ],
+      "confidence": 0.691
+    },
+    {
+      "query": "普通咨询提交后多久会有人回复",
+      "expected_category": "general",
+      "predicted_category": "general",
+      "expected_document": "service_hours",
+      "retrieved_documents": [
+        "refund_timing",
+        "service_hours",
+        "service_hours"
+      ],
+      "confidence": 0.38
+    }
+  ],
   "priority_failures": []
 }

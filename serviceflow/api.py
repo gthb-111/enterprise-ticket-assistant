@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Annotated, Any
 
 from fastapi import (
@@ -17,7 +18,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .config import Settings
+from .config import PROJECT_ROOT, Settings
 from .documents import MAX_DOCUMENT_BYTES, DocumentStore, parse_document
 from .engine import TriageEngine
 from .knowledge import KnowledgeBase
@@ -192,6 +193,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/model/info")
     def model_info() -> dict[str, Any]:
         return engine.model.info()
+
+    @app.get("/api/evaluation")
+    def evaluation_results() -> dict[str, Any]:
+        path = PROJECT_ROOT / "docs" / "evaluation-results.json"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="评测结果尚未生成")
+        return json.loads(path.read_text(encoding="utf-8"))
 
     @app.post("/api/model/test")
     def model_test() -> dict[str, Any]:

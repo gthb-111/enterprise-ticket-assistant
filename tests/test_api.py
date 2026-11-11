@@ -1,8 +1,10 @@
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
+from docx import Document
 from fastapi.testclient import TestClient
 
 from serviceflow.api import create_app
@@ -46,6 +48,16 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(payload["configured"])
         self.assertEqual(payload["mode"], "offline_fallback")
         self.assertNotIn("api_key", payload)
+
+    def test_evaluation_results_are_available(self):
+        response = self.client.get("/api/evaluation")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertGreaterEqual(payload["cases"], 50)
+        self.assertEqual(
+            {item["name"] for item in payload["retrieval_modes"]},
+            {"lexical", "vector", "hybrid", "hybrid_rerank"},
+        )
 
     def test_assist_creates_ticket_and_metrics(self):
         response = self.client.post(
@@ -144,6 +156,26 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("当前仅支持", response.json()["error"])
+
+    def test_docx_document_is_extracted(self):
+        document = Document()
+        document.add_heading("办公用品采购规则", level=1)
+        document.add_paragraph("单笔超过五千元需要部门负责人审批。")
+        buffer = BytesIO()
+        document.save(buffer)
+        response = self.client.post(
+            "/api/documents",
+            data={"title": "办公用品采购规则", "category": "general"},
+            files={
+                "file": (
+                    "procurement.docx",
+                    buffer.getvalue(),
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertGreaterEqual(response.json()["document"]["chunk_count"], 1)
 
     def test_retrieval_debug_endpoint_returns_hybrid_scores(self):
         response = self.client.get(

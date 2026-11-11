@@ -1,0 +1,16 @@
+services:
+  serviceflow:
+    build: .
+    ports:
+      - "8877:8877"
+    env_file:
+      - .env
+    environment:
+      SERVICEFLOW_HOST: 0.0.0.0
+      SERVICEFLOW_DATA_DIR: /app/.data
+    volumes:
+      - serviceflow-data:/app/.data
+    restart: unless-stopped
+
+volumes:
+  serviceflow-data:

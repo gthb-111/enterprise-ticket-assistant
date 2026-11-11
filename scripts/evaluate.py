@@ -4,6 +4,7 @@ import argparse
 import json
 import statistics
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -13,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 from serviceflow.classifier import CATEGORY_LABELS, classify  # noqa: E402
 from serviceflow.config import Settings  # noqa: E402
 from serviceflow.knowledge import KnowledgeBase  # noqa: E402
+from serviceflow.retrieval import heuristic_rerank, rewrite_query  # noqa: E402
 
 
 def load_cases(path: Path) -> list[dict[str, str]]:
@@ -35,6 +37,63 @@ def macro_f1(expected: list[str], predicted: list[str]) -> float:
     return statistics.mean(values) if values else 0.0
 
 
+def evaluate_retrieval(
+    kb: KnowledgeBase,
+    cases: list[dict[str, str]],
+    mode: str,
+    rerank: bool = False,
+) -> dict[str, object]:
+    hit_at_1 = 0
+    hit_at_3 = 0
+    reciprocal_ranks: list[float] = []
+    latencies: list[float] = []
+    failures: list[dict[str, object]] = []
+    for case in cases:
+        rewritten = rewrite_query(case["query"])
+        started = time.perf_counter()
+        matches = kb.search(
+            rewritten.rewritten_query,
+            case["category"],
+            top_k=20,
+            mode=mode,
+        )
+        if rerank:
+            matches = heuristic_rerank(
+                rewritten.rewritten_query,
+                matches,
+                limit=20,
+            )
+        latencies.append((time.perf_counter() - started) * 1000)
+        docs = [item.chunk.doc_id for item in matches]
+        expected = case["document"]
+        hit_at_1 += int(bool(docs) and docs[0] == expected)
+        hit_at_3 += int(expected in docs[:3])
+        rank = next(
+            (index + 1 for index, document in enumerate(docs) if document == expected),
+            None,
+        )
+        reciprocal_ranks.append(1 / rank if rank else 0.0)
+        if rank is None or rank > 3:
+            failures.append(
+                {
+                    "query": case["query"],
+                    "expected_document": expected,
+                    "rank": rank,
+                    "retrieved_documents": docs[:3],
+                }
+            )
+    total = len(cases)
+    name = f"{mode}_rerank" if rerank else mode
+    return {
+        "name": name,
+        "hit_at_1": round(hit_at_1 / total, 4),
+        "hit_at_3": round(hit_at_3 / total, 4),
+        "mrr_at_5": round(sum(reciprocal_ranks) / total, 4),
+        "average_latency_ms": round(statistics.mean(latencies), 3),
+        "failures": failures,
+    }
+
+
 def run(path: Path) -> dict[str, object]:
     settings = Settings.from_env()
     kb = KnowledgeBase.load(settings.knowledge_dir)
@@ -42,14 +101,13 @@ def run(path: Path) -> dict[str, object]:
     expected_categories: list[str] = []
     predicted_categories: list[str] = []
     category_correct = 0
-    document_hit_1 = 0
-    document_hit_3 = 0
     priority_correct = 0
     priority_under_escalated = 0
     priority_over_escalated = 0
     failures: list[dict[str, object]] = []
     priority_failures: list[dict[str, object]] = []
     confusion: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    retrieval_modes: list[dict[str, object]] = []
 
     for case in cases:
         result = classify(case["query"])
@@ -60,8 +118,6 @@ def run(path: Path) -> dict[str, object]:
         confusion[case["category"]][result.category] += 1
         category_ok = result.category == case["category"]
         category_correct += int(category_ok)
-        document_hit_1 += int(bool(doc_ids) and doc_ids[0] == case["document"])
-        document_hit_3 += int(case["document"] in doc_ids)
         priority_ok = result.priority == case["priority"]
         priority_correct += int(priority_ok)
         priority_rank = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
@@ -90,12 +146,24 @@ def run(path: Path) -> dict[str, object]:
             )
 
     total = len(cases)
+    for mode, rerank in (
+        ("lexical", False),
+        ("vector", False),
+        ("hybrid", False),
+        ("hybrid", True),
+    ):
+        retrieval_modes.append(evaluate_retrieval(kb, cases, mode, rerank))
+    primary_retrieval = next(
+        item for item in retrieval_modes if item["name"] == "hybrid_rerank"
+    )
     return {
         "cases": total,
         "category_accuracy": round(category_correct / total, 4),
         "category_macro_f1": round(macro_f1(expected_categories, predicted_categories), 4),
-        "retrieval_hit_at_1": round(document_hit_1 / total, 4),
-        "retrieval_hit_at_3": round(document_hit_3 / total, 4),
+        "retrieval_hit_at_1": primary_retrieval["hit_at_1"],
+        "retrieval_hit_at_3": primary_retrieval["hit_at_3"],
+        "retrieval_mrr_at_5": primary_retrieval["mrr_at_5"],
+        "retrieval_modes": retrieval_modes,
         "priority_accuracy": round(priority_correct / total, 4),
         "priority_under_escalated": priority_under_escalated,
         "priority_over_escalated": priority_over_escalated,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import re
 import sqlite3
 import uuid
@@ -10,11 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from docx import Document
+from pypdf import PdfReader
+
 from .knowledge import Chunk
 
 
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
-SUPPORTED_EXTENSIONS = {".md", ".markdown", ".txt"}
+SUPPORTED_EXTENSIONS = {".md", ".markdown", ".txt", ".pdf", ".docx"}
 MAX_CHUNK_CHARS = 700
 CHUNK_OVERLAP_CHARS = 80
 
@@ -190,13 +194,32 @@ def parse_document(
     if len(raw) > MAX_DOCUMENT_BYTES:
         raise ValueError("上传文件不能超过 2 MB")
 
-    try:
-        content = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
+    if suffix == ".pdf":
         try:
-            content = raw.decode("gb18030")
-        except UnicodeDecodeError as exc:
-            raise ValueError("文件必须使用 UTF-8 或 GB18030 编码") from exc
+            reader = PdfReader(io.BytesIO(raw))
+            content = "\n\n".join(
+                page.extract_text() or "" for page in reader.pages
+            )
+        except Exception as exc:
+            raise ValueError("PDF 文件无法解析") from exc
+    elif suffix == ".docx":
+        try:
+            document = Document(io.BytesIO(raw))
+            blocks = [paragraph.text for paragraph in document.paragraphs]
+            for table in document.tables:
+                for row in table.rows:
+                    blocks.append(" | ".join(cell.text for cell in row.cells))
+            content = "\n\n".join(blocks)
+        except Exception as exc:
+            raise ValueError("DOCX 文件无法解析") from exc
+    else:
+        try:
+            content = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            try:
+                content = raw.decode("gb18030")
+            except UnicodeDecodeError as exc:
+                raise ValueError("文件必须使用 UTF-8 或 GB18030 编码") from exc
 
     content = content.replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
     content = re.sub(r"\n{4,}", "\n\n\n", content).strip()

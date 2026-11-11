@@ -53,7 +53,7 @@ class Settings:
                 "OPENAI_BASE_URL", "https://api.openai.com/v1"
             ).rstrip("/"),
             openai_model=os.getenv("SERVICEFLOW_MODEL", "gpt-4.1-mini"),
-            vector_weight=float(os.getenv("SERVICEFLOW_VECTOR_WEIGHT", "0.35")),
+            vector_weight=float(os.getenv("SERVICEFLOW_VECTOR_WEIGHT", "0.1")),
             vector_dimensions=int(os.getenv("SERVICEFLOW_VECTOR_DIMENSIONS", "512")),
             llm_timeout_seconds=float(
                 os.getenv("SERVICEFLOW_LLM_TIMEOUT_SECONDS", "30")

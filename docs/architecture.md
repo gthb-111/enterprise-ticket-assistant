@@ -16,7 +16,7 @@
 
 | 组件 | 文件 | 职责 |
 | --- | --- | --- |
-| HTTP API | `serviceflow/server.py` | 静态文件、JSON API、参数校验、路径约束 |
+| HTTP API | `serviceflow/api.py` | FastAPI 路由、JSON API、参数校验、OpenAPI 文档 |
 | 分流引擎 | `serviceflow/engine.py` | 串联脱敏、分类、检索、答复和策略 |
 | 意图分类 | `serviceflow/classifier.py` | 7 类意图、P0-P3、风险信号和解释 |
 | 知识检索 | `serviceflow/knowledge.py` | Markdown 切片、索引、BM25、引用句抽取 |

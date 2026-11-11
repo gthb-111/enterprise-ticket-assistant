@@ -1,8 +1,8 @@
 # ServiceFlow AI：企业工单分流 + 知识库问答助手
 
-一个可直接运行的服务运营项目：接收客户问题后，自动完成敏感信息脱敏、业务意图识别、风险与紧急度评估、知识库检索、带来源答复、人工升级和工单沉淀。
+一个可直接运行的服务运营项目：接收客户问题后，通过 LangGraph 编排敏感信息脱敏、业务意图识别、风险与紧急度评估、知识库检索、带来源答复、人工升级和工单沉淀。
 
-项目默认不依赖第三方 Python 包，也不需要联网或 API Key；配置 OpenAI 兼容模型后，可在原有证据约束流程上启用生成式润色。
+项目使用 FastAPI 提供服务，默认不需要联网或 API Key；配置 OpenAI 兼容模型后，可在原有证据约束流程上启用生成式润色。
 
 ![ServiceFlow AI 工作台](docs/workspace-screenshot.png)
 
@@ -22,16 +22,23 @@ ServiceFlow AI 将这些决策放在同一条可审计的流水线里。
 
 - **工单分流**：账单、账号、物流、退款、技术、投诉、通用咨询 7 类意图。
 - **优先级策略**：P0-P3 分级；资金安全、账号被盗、监管投诉等风险强制升级。
-- **中文知识检索**：BM25 + 中文字符/二元词召回 + 类目加权，返回可展开的段落级来源。
+- **混合知识检索**：查询改写、BM25、离线哈希向量和启发式 Rerank 组合排序，支持类目加权和段落级来源。
+- **文档入库**：通过 API 上传 Markdown 或 TXT 文档，解析、切分并持久化到知识索引。
 - **安全答复**：低相关性、低置信和高风险请求不会被直接自动回复。
 - **可选大模型**：仅使用检索证据生成答复；模型超时或不可用时回退到本地抽取式答案。
 - **隐私保护**：手机号、邮箱、证件号、银行卡号和常见订单号在入库前脱敏。
 - **运营闭环**：工单状态、负责团队、SLA、用户反馈、自动解决率与升级率。
+- **Agent 编排**：LangGraph 条件分支、自动工单节点、人工交接节点和逐步执行轨迹。
+- **会话与流式输出**：持久化多轮会话，追问可携带上下文，SSE 返回节点进度和答案增量。
 - **响应式工作台**：智能分流、工单中心、知识库三个视图，适配桌面和移动端。
 
 ## 快速运行
 
-需要 Python 3.10 或更高版本。
+需要 Python 3.10 或更高版本。首次运行先安装项目依赖：
+
+```powershell
+python -m pip install -e .
+```
 
 ```powershell
 cd enterprise-ticket-assistant
@@ -89,13 +96,22 @@ python run.py serve
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/api/health` | 服务与知识库状态 |
+| `GET` | `/api/agent/info` | Agent 框架、节点和路由信息 |
 | `POST` | `/api/assist` | 分流、检索、答复并创建工单 |
 | `GET` | `/api/tickets` | 工单列表，支持状态与数量筛选 |
 | `POST` | `/api/tickets/{id}/status` | 更新人工处理状态 |
 | `POST` | `/api/tickets/{id}/feedback` | 记录“有帮助 / 需优化”反馈 |
 | `GET` | `/api/metrics` | 业务指标聚合 |
 | `GET` | `/api/knowledge` | 知识文档列表 |
+| `GET` | `/api/retrieval/search` | 查看关键词、向量和混合相关性得分 |
 | `POST` | `/api/knowledge/reload` | 重新载入 Markdown 知识 |
+| `GET` | `/api/documents` | 查看已上传文档及切分数量 |
+| `POST` | `/api/documents` | 上传 Markdown 或 TXT 文档并建立索引 |
+| `GET` | `/api/documents/{id}` | 查看文档元数据 |
+| `POST` | `/api/sessions` | 创建多轮会话 |
+| `GET` | `/api/sessions/{id}` | 查看会话和历史消息 |
+| `POST` | `/api/chat` | 在会话中运行 Agent 并返回完整结果 |
+| `POST` | `/api/chat/stream` | 以 SSE 流式返回 Agent 节点和答案 |
 
 示例：
 

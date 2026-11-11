@@ -21,6 +21,8 @@ class Settings:
     openai_api_key: str
     openai_base_url: str
     openai_model: str
+    vector_weight: float
+    vector_dimensions: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -44,5 +46,7 @@ class Settings:
                 "OPENAI_BASE_URL", "https://api.openai.com/v1"
             ).rstrip("/"),
             openai_model=os.getenv("SERVICEFLOW_MODEL", "gpt-4.1-mini"),
+            vector_weight=float(os.getenv("SERVICEFLOW_VECTOR_WEIGHT", "0.35")),
+            vector_dimensions=int(os.getenv("SERVICEFLOW_VECTOR_DIMENSIONS", "512")),
         )
 

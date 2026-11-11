@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 from dataclasses import dataclass, field
@@ -47,11 +48,11 @@ class RetrievedChunk:
     chunk: Chunk
     score: float
     coverage: float
-
-    @property
-    def relevance(self) -> float:
-        raw = self.score / (self.score + 5.0)
-        return round(min(0.99, 0.58 * raw + 0.42 * self.coverage), 3)
+    vector_score: float = 0.0
+    lexical_relevance: float = 0.0
+    hybrid_relevance: float = 0.0
+    relevance: float = 0.0
+    rerank_score: float = 0.0
 
 
 @dataclass
@@ -60,10 +61,21 @@ class KnowledgeBase:
     _term_frequency: list[dict[str, int]] = field(default_factory=list)
     _doc_frequency: dict[str, int] = field(default_factory=dict)
     _avg_length: float = 0.0
+    _vectors: list[list[float]] = field(default_factory=list)
+    vector_weight: float = 0.35
+    vector_dimensions: int = 512
 
     @classmethod
-    def load(cls, directory: Path) -> "KnowledgeBase":
-        kb = cls()
+    def load(
+        cls,
+        directory: Path,
+        vector_weight: float = 0.35,
+        vector_dimensions: int = 512,
+    ) -> "KnowledgeBase":
+        kb = cls(
+            vector_weight=max(0.0, min(vector_weight, 1.0)),
+            vector_dimensions=max(64, vector_dimensions),
+        )
         for path in sorted(directory.glob("*.md")):
             raw = path.read_text(encoding="utf-8")
             meta, body = _split_frontmatter(raw)
@@ -89,6 +101,12 @@ class KnowledgeBase:
         kb._build_index()
         return kb
 
+    def add_chunks(self, chunks: list[Chunk]) -> None:
+        if not chunks:
+            return
+        self.chunks.extend(chunks)
+        self._build_index()
+
     def _build_index(self) -> None:
         self._term_frequency = []
         self._doc_frequency = {}
@@ -103,6 +121,10 @@ class KnowledgeBase:
             for token in tf:
                 self._doc_frequency[token] = self._doc_frequency.get(token, 0) + 1
         self._avg_length = sum(lengths) / max(len(lengths), 1)
+        model = HashingEmbeddingModel(self.vector_dimensions)
+        self._vectors = [
+            model.embed(chunk.title + " " + chunk.text) for chunk in self.chunks
+        ]
 
     def search(
         self,
@@ -113,6 +135,7 @@ class KnowledgeBase:
         terms = unique_terms(tokenize(query))
         if not terms:
             return []
+        query_vector = HashingEmbeddingModel(self.vector_dimensions).embed(query)
         total_docs = max(len(self.chunks), 1)
         scored: list[RetrievedChunk] = []
         for index, chunk in enumerate(self.chunks):
@@ -134,13 +157,31 @@ class KnowledgeBase:
                 matched_weight += term_weight(term)
             if category and chunk.category == category:
                 score *= 1.28
+            vector_score = _cosine(query_vector, self._vectors[index])
             if score > 0:
                 coverage = min(1.0, matched_weight / total_weight)
                 if coverage >= 0.12:
-                    scored.append(
-                        RetrievedChunk(chunk=chunk, score=score, coverage=coverage)
+                    lexical_relevance = 0.0
+                    raw = score / (score + 5.0)
+                    lexical_relevance = min(
+                        0.99, 0.58 * raw + 0.42 * coverage
                     )
-        scored.sort(key=lambda item: item.score, reverse=True)
+                    relevance = (
+                        (1.0 - self.vector_weight) * lexical_relevance
+                        + self.vector_weight * vector_score
+                    )
+                    scored.append(
+                        RetrievedChunk(
+                            chunk=chunk,
+                            score=score,
+                            coverage=coverage,
+                            vector_score=round(vector_score, 4),
+                            lexical_relevance=round(lexical_relevance, 4),
+                            hybrid_relevance=round(min(0.99, relevance), 3),
+                            relevance=round(min(0.99, relevance), 3),
+                        )
+                    )
+        scored.sort(key=lambda item: item.relevance, reverse=True)
         return scored[:top_k]
 
     def get(self, doc_id: str) -> list[Chunk]:
@@ -229,4 +270,37 @@ def best_sentences(chunks: list[RetrievedChunk], query: str, limit: int = 3) -> 
         if len(selected) >= limit:
             break
     return selected
+
+
+class HashingEmbeddingModel:
+    """Deterministic offline embeddings for a runnable hybrid-search baseline.
+
+    This is feature hashing rather than a semantic neural model. It keeps the
+    local demo independent of external APIs while exposing the same vector
+    interface that a remote embedding provider will implement later.
+    """
+
+    def __init__(self, dimensions: int):
+        self.dimensions = dimensions
+
+    def embed(self, text: str) -> list[float]:
+        vector = [0.0] * self.dimensions
+        for token in tokenize(text):
+            digest = hashlib.blake2b(
+                token.encode("utf-8"), digest_size=8
+            ).digest()
+            value = int.from_bytes(digest, "big")
+            index = value % self.dimensions
+            sign = 1.0 if value & 1 else -1.0
+            vector[index] += sign * term_weight(token)
+        norm = math.sqrt(sum(value * value for value in vector))
+        if norm:
+            return [value / norm for value in vector]
+        return vector
+
+
+def _cosine(left: list[float], right: list[float]) -> float:
+    if not left or not right:
+        return 0.0
+    return max(0.0, min(1.0, sum(a * b for a, b in zip(left, right))))
 

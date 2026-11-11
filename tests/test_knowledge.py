@@ -27,6 +27,13 @@ class KnowledgeTests(unittest.TestCase):
         matches = self.kb.search("火星天气如何")
         self.assertFalse(matches)
 
+    def test_search_exposes_hybrid_vector_scores(self):
+        matches = self.kb.search("退款审核通过后多久到账", "refund")
+        self.assertTrue(matches)
+        self.assertGreater(matches[0].vector_score, 0)
+        self.assertGreater(matches[0].lexical_relevance, 0)
+        self.assertGreater(matches[0].relevance, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

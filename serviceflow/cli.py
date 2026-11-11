@@ -80,19 +80,18 @@ def main() -> None:
         server = create_server(settings)
         print(f"ServiceFlow AI: http://{settings.host}:{settings.port}")
         print("Press Ctrl+C to stop.")
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            server.server_close()
+        server.run()
         return
 
     from .engine import TriageEngine
     from .knowledge import KnowledgeBase
     from .storage import TicketStore
 
-    kb = KnowledgeBase.load(settings.knowledge_dir)
+    kb = KnowledgeBase.load(
+        settings.knowledge_dir,
+        vector_weight=settings.vector_weight,
+        vector_dimensions=settings.vector_dimensions,
+    )
     store = TicketStore(settings.db_path)
     engine = TriageEngine(kb, store, settings)
     if args.command == "assist":
